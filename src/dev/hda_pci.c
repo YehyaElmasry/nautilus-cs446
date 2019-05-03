@@ -132,7 +132,8 @@ static inline void hda_pci_write_regl(struct hda_pci_dev *dev, uint32_t offset, 
 {
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
-    __asm__ __volatile__ ("movl %1, (%0)" : "=r"(addr): "r"(data) : "memory");
+    //__asm__ __volatile__ ("movq %1, (%0)" : "=r"(addr): "r"((uint64_t)data) : "memory");
+    *(uint32_t*)(addr) = data; 
   } else {
     outl(data,dev->ioport_start+offset);
   }
@@ -142,7 +143,8 @@ static inline void hda_pci_write_regw(struct hda_pci_dev *dev, uint32_t offset, 
 {
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
-    __asm__ __volatile__ ("movw %1, (%0)" : "=r"(addr): "r"(data) : "memory");
+    //__asm__ __volatile__ ("movw %1, (%0)" : "=r"(addr): "r"(data) : "memory");
+    *(uint16_t*)(addr) = data; 
   } else {
     outw(data,dev->ioport_start+offset);
   }
@@ -152,7 +154,8 @@ static inline void hda_pci_write_regb(struct hda_pci_dev *dev, uint32_t offset, 
 {
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
-    __asm__ __volatile__ ("movb %1, (%0)" : "=r"(addr): "r"(data) : "memory");
+    //__asm__ __volatile__ ("movb %1, (%0)" : "=r"(addr): "r"(data) : "memory");
+    *(uint8_t*)(addr) = data; 
   } else {
     outb(data,dev->ioport_start+offset);
   }
@@ -294,10 +297,11 @@ static int discover_devices(struct pci_info *pci)
   return 0;
 }
 
-			 
 static int bringup_device(struct hda_pci_dev *dev)
 {
-  DEBUG("Bringing up device %u:%u.%u\n",dev->pci_dev->bus->num,dev->pci_dev->num,dev->pci_dev->fun);
+  DEBUG("Bringing up device %u:%u.%u. Starting Address is: %x\n",
+  dev->pci_dev->bus->num,dev->pci_dev->num,dev->pci_dev->fun, dev->mem_start);
+
   if (dev->pci_dev->msi.type!=PCI_MSI_NONE) {
     // switch on early (and detect - we will no do legacy or MSI-X)
 #if 0 // do interrupt setup later
@@ -310,8 +314,43 @@ static int bringup_device(struct hda_pci_dev *dev)
     ERROR("Device does not support MSI...\n");
     return -1;
   }
+/*
+  uint16_t old_cmd = pci_dev_cfg_readw(dev->pci_dev, 0x4);
+  DEBUG("Old PCI CMD: 0x%04x\n",old_cmd);
 
+  old_cmd |= 0x7;  // make sure bus master is enabled
+  old_cmd &= ~0x40;
+
+  DEBUG("New PCI CMD: 0x%04x\n",old_cmd);
+
+  pci_dev_cfg_writew(dev->pci_dev, 0x4, old_cmd);
+
+  uint16_t stat = pci_dev_cfg_readw(dev->pci_dev ,0x6);
+  DEBUG("PCI STATUS: 0x%04x\n",stat);
+*/
   // initialize device here...
+  uint8_t major, minor;
+  uint16_t cap;
+  minor = hda_pci_read_regb(dev, MINOR);
+  major = hda_pci_read_regb(dev, MAJOR);
+  cap = hda_pci_read_regw(dev, GLOB_CAP);
+  DEBUG("Major: %x, minor: %x, cap: %x\n", major, minor, cap);
+  
+  uint32_t glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL);
+  DEBUG("GLOB CTRL: %x\n", glob_ctrl_val);
+
+  hda_pci_write_regl(dev, GLOB_CTRL, glob_ctrl_val | CRST_MASK);
+  DEBUG("Wrote 1 to CRST bit of GLOB CTRL\n");
+
+  DEBUG("Waiting for device to come out of reset...\n");
+  
+  // Wait until the CRST bit is flipped to one (device is done resetting)
+  while(((glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL)) & CRST_MASK) == 0){
+    DEBUG("GLOB CTRL is %x!\n", glob_ctrl_val);
+  }
+
+  DEBUG("Device is out of reset\n");
+  DEBUG("GLOB CTRL is %x!\n", hda_pci_read_regl(dev, GLOB_CTRL));
 
   return 0;
 }

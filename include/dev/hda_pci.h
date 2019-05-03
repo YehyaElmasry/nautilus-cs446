@@ -34,5 +34,13 @@ int hda_pci_deinit();
 // A sound device interface would go into nautilus/snddev.h
 //
 
+// Register offsets from the device starting address
+#define GLOB_CAP    0x00
+#define MINOR       0x02
+#define MAJOR       0x03
+#define GLOB_CTRL   0x08
+
+// Bits masks within registers
+#define CRST_MASK   0x1
 
 #endif
