@@ -132,8 +132,7 @@ static inline void hda_pci_write_regl(struct hda_pci_dev *dev, uint32_t offset, 
 {
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
-    //__asm__ __volatile__ ("movq %1, (%0)" : "=r"(addr): "r"((uint64_t)data) : "memory");
-    *(uint32_t*)(addr) = data; 
+    __asm__ __volatile__ ("movl %1, (%0)" : : "r"(addr), "r"(data) : "memory");
   } else {
     outl(data,dev->ioport_start+offset);
   }
@@ -143,8 +142,7 @@ static inline void hda_pci_write_regw(struct hda_pci_dev *dev, uint32_t offset, 
 {
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
-    //__asm__ __volatile__ ("movw %1, (%0)" : "=r"(addr): "r"(data) : "memory");
-    *(uint16_t*)(addr) = data; 
+     __asm__ __volatile__ ("movw %1, (%0)" : : "r"(addr), "r"(data) : "memory");
   } else {
     outw(data,dev->ioport_start+offset);
   }
@@ -154,8 +152,7 @@ static inline void hda_pci_write_regb(struct hda_pci_dev *dev, uint32_t offset, 
 {
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
-    //__asm__ __volatile__ ("movb %1, (%0)" : "=r"(addr): "r"(data) : "memory");
-    *(uint8_t*)(addr) = data; 
+    __asm__ __volatile__ ("movb %1, (%0)" : : "r"(addr), "r"(data) : "memory"); 
   } else {
     outb(data,dev->ioport_start+offset);
   }
