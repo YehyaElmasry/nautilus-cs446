@@ -294,6 +294,45 @@ static int discover_devices(struct pci_info *pci)
   return 0;
 }
 
+static void hda_reset(struct hda_pci_dev *dev)
+{
+  uint32_t glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL);
+  DEBUG("GLOB CTRL: %x\n", glob_ctrl_val);
+
+  hda_pci_write_regl(dev, GLOB_CTRL, glob_ctrl_val | CRST_MASK);
+  DEBUG("Wrote 1 to CRST bit of GLOB CTRL\n");
+
+  DEBUG("Waiting for device to come out of reset...\n");
+  
+  // Wait until the CRST bit is flipped to one (device is done resetting)
+  while(((glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL)) & CRST_MASK) == 0){
+    DEBUG("GLOB CTRL is %x!\n", glob_ctrl_val);
+  }
+  DEBUG("Device is out of reset\n");
+}
+static void hda_test(struct hda_pci_dev *dev)
+{
+  uint8_t major, minor;
+  uint16_t cap;
+  minor = hda_pci_read_regb(dev, MINOR);
+  major = hda_pci_read_regb(dev, MAJOR);
+  cap = hda_pci_read_regw(dev, GLOB_CAP);
+  DEBUG("Major: %x, Minor: %x, Glob Cap: %x\n", major, minor, cap);
+}
+
+static void hda_discover_codecs(struct hda_pci_dev *dev)
+{
+  // Discover codecs
+  uint16_t statests = 0; 
+
+  statests = hda_pci_read_regw(dev, STATESTS);
+  DEBUG("Statests Value before delay: %x\n", statests);
+  
+  udelay(CODECS_DELAY * 100); // Wait for codecs to be initialized
+  
+  statests = hda_pci_read_regw(dev, STATESTS);
+  DEBUG("Statests Value after delay: %x\n", statests);
+}
 static int bringup_device(struct hda_pci_dev *dev)
 {
   DEBUG("Bringing up device %u:%u.%u. Starting Address is: %x\n",
@@ -311,43 +350,20 @@ static int bringup_device(struct hda_pci_dev *dev)
     ERROR("Device does not support MSI...\n");
     return -1;
   }
-/*
-  uint16_t old_cmd = pci_dev_cfg_readw(dev->pci_dev, 0x4);
-  DEBUG("Old PCI CMD: 0x%04x\n",old_cmd);
 
-  old_cmd |= 0x7;  // make sure bus master is enabled
-  old_cmd &= ~0x40;
+  // Initialize device here...
 
-  DEBUG("New PCI CMD: 0x%04x\n",old_cmd);
+  // Make sure can read from device. For debugging
+  hda_test(dev);
 
-  pci_dev_cfg_writew(dev->pci_dev, 0x4, old_cmd);
-
-  uint16_t stat = pci_dev_cfg_readw(dev->pci_dev ,0x6);
-  DEBUG("PCI STATUS: 0x%04x\n",stat);
-*/
-  // initialize device here...
-  uint8_t major, minor;
-  uint16_t cap;
-  minor = hda_pci_read_regb(dev, MINOR);
-  major = hda_pci_read_regb(dev, MAJOR);
-  cap = hda_pci_read_regw(dev, GLOB_CAP);
-  DEBUG("Major: %x, minor: %x, cap: %x\n", major, minor, cap);
+  // Clear STATESTS register
+	//hda_pci_write_regw(dev, STATESTS, STATESTS_INT_MASK);
   
-  uint32_t glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL);
-  DEBUG("GLOB CTRL: %x\n", glob_ctrl_val);
+  // Reset device
+  //hda_reset(dev);
 
-  hda_pci_write_regl(dev, GLOB_CTRL, glob_ctrl_val | CRST_MASK);
-  DEBUG("Wrote 1 to CRST bit of GLOB CTRL\n");
-
-  DEBUG("Waiting for device to come out of reset...\n");
-  
-  // Wait until the CRST bit is flipped to one (device is done resetting)
-  while(((glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL)) & CRST_MASK) == 0){
-    DEBUG("GLOB CTRL is %x!\n", glob_ctrl_val);
-  }
-
-  DEBUG("Device is out of reset\n");
-  DEBUG("GLOB CTRL is %x!\n", hda_pci_read_regl(dev, GLOB_CTRL));
+  // Discover Codecs
+  //hda_discover_codecs(dev);
 
   return 0;
 }
