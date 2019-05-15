@@ -21,7 +21,9 @@
 
 #include <nautilus/nautilus.h>
 #include <nautilus/dev.h>   // eventually snddev.h
+#include <nautilus/irq.h>
 #include <dev/pci.h>
+
 #include <dev/hda_pci.h>
 
 #ifndef NAUT_CONFIG_DEBUG_HDA_PCI
@@ -32,6 +34,14 @@
 #define INFO(fmt, args...) INFO_PRINT("hda_pci: " fmt, ##args)
 #define DEBUG(fmt, args...) DEBUG_PRINT("hda_pci: " fmt, ##args)
 #define ERROR(fmt, args...) ERROR_PRINT("hda_pci: " fmt, ##args)
+
+// show output for all reg read/writes
+#define DO_DEBUG_REGS 1
+#if DO_DEBUG_REGS
+#define DEBUG_REGS(fmt, args...) DEBUG(fmt, ##args)
+#else
+#define DEBUG_REGS(fmt, args...)
+#endif
 
 #define GLOBAL_LOCK_CONF uint8_t _global_lock_flags
 #define GLOBAL_LOCK() _global_lock_flags = spin_lock_irq_save(&global_lock)
@@ -54,6 +64,245 @@ static int num_devs=0;
 
 // list of hda devices
 static struct list_head dev_list;
+
+#define GCAP     0x0
+#define GCAP_LEN 0x2
+typedef union gcap { // all read only
+    uint16_t val;
+    struct {
+	uint8_t ok64:1;
+	uint8_t nsdo:2;
+	uint8_t bss:5;
+	uint8_t iss:4;
+	uint8_t oss:4;
+#define NUM_SDO(x) (((x).nsdo)==0 ? 1 : ((x).nsdo)==1 ? 2 : ((x).nsdo)==2 ? 4 : 0)
+    };
+} __attribute__((packed)) gcap_t;
+
+#define VMIN     0x2
+#define VMIN_LEN 0x1
+typedef uint8_t vmin_t;  // readonly
+
+#define VMAJ     0x3
+#define VMAJ_LEN 0x1
+typedef uint8_t vmaj_t;  // read only
+
+#define OUTPAY     0x4
+#define OUTPAY_LEN 0x2
+typedef uint16_t outpay_t;  // read only, maximum payload size
+
+#define INPAY     0x6
+#define INPAY_LEN 0x2
+typedef uint16_t inpay_t;  // read only, maximum payload size
+
+#define GCTL      0x8
+#define GCTL_LEN  0x4
+typedef union {
+    uint32_t val;
+    struct {
+	uint8_t crst:1;  // read write sticky => write 0 to assert reset, 1 to deassert rest, read of 1=> ready
+	                 // must have CORB/RIRB RUN, and stream RUN bits off before vbefore reset
+	uint8_t fcntrl:1;// read write write 1 to initiate flush, cycle ends with Flush Status
+	uint8_t res2:6;  // reserved, preserve
+	uint8_t unsol:1; // read write 1=> unsolicited responses from codecs are forwarded to RIRB
+	uint32_t res1:23;// reserved, preserve 
+    };
+} __attribute__((packed)) gctl_t;
+
+#define WAKEEN     0xc
+#define WAKEEN_LEN 0x2
+typedef uint16_t wakeen_t;
+
+#define STATESTS     0xe
+#define STATESTS_LEN 0x2
+typedef union {
+    uint16_t val;
+    struct {
+	uint16_t  sdiwake:15;  // read only, write 1 to clear, sticky, flag
+#define SDIMAX 15
+#define SDIWAKE(s,i) ((((s).sdiwake)>>(i)) & 0x1)
+#define SDIWAKE_RESET_MASK 0x7fff
+	uint8_t   res:1;    // reserved zero
+    };
+} __attribute__((packed)) statests_t;
+
+#define CORBLBASE      0x40
+#define CORBLBASE_LEN  0x4
+typedef uint32_t corblbase_t;   // 128 byte alignment!
+
+#define CORBUBASE      0x44
+#define CORBUBASE_LEN  0x4
+typedef uint32_t corbubase_t;   
+
+#define CORBWP         0x48
+#define CORBWP_LEN     0x2
+typedef union {
+    uint16_t val;
+    struct {
+	uint8_t corbwp;  // in units of corb commands (4 bytes each)
+	uint8_t res;    // reserved/preserve
+    };
+} __attribute__((packed)) corbwp_t;
+
+#define CORBRP         0x4a
+#define CORBRP_LEN     0x2
+typedef union {
+    uint16_t val;
+    struct {
+	uint8_t corbrp;   // in units of corb commands
+	uint8_t res:7;    // reserved/preserve
+	uint8_t corbrprst:1;  // rw 1=> flush+reset, then wait to transition to 1, then write 0, then wait for transition to 1
+    };
+} __attribute__((packed)) corbrp_t;
+
+#define CORBCTL         0x4c
+#define CORBCTL_LEN     0x1
+typedef union {
+    uint8_t val;
+    struct {
+	uint8_t cmeie:1;    // generate interrupt if memory error
+	uint8_t corbrun:1;  // write 1 => start CORB DMA, read value back to confirm started
+    };
+} __attribute__((packed)) corbctl_t;
+
+#define CORBSTS         0x4d
+#define CORBSTS_LEN     0x1
+typedef union {
+    uint8_t val;
+    struct {
+	uint8_t cmei:1;    // memory error detected (DMA is borked), write 1 to clear
+	uint8_t res:7;    // preserve
+    };
+} __attribute__((packed)) corbsts_t;
+
+#define CORBSIZE         0x4e
+#define CORBSIZE_LEN     0x1
+typedef union {
+    uint8_t val;
+    struct {
+	uint8_t corbsize:2;
+#define CORBSIZE_DECODE(x) ((x->corbsize==0 ? 2 : x->corbsize==1 ? 16 : x->corbsize==2 : 256 : 0))
+	uint8_t res:2;    // preserve
+	uint8_t corbszcap:4; // read onlye
+#define CORBSIZECAP_HAS_2(x) (!!(x.corbszcap & 0x1))
+#define CORBSIZECAP_HAS_16(x) (!!(x.corbszcap & 0x2))
+#define CORBSIZECAP_HAS_256(x) (!!(x.corbszcap & 0x4))
+    };
+} __attribute__((packed)) corbsize_t;
+
+
+#define RIRBLBASE      0x50
+#define RIRBLBASE_LEN  0x4
+typedef uint32_t rirblbase_t;   // 128 byte alignment!
+
+#define RIRBUBASE      0x54
+#define RIRBUBASE_LEN  0x4
+typedef uint32_t rirbubase_t;   
+
+#define RIRBWP         0x58
+#define RIRBWP_LEN     0x2
+typedef union {
+    uint16_t val;
+    struct {
+	uint8_t rirbwp;      // in units of rirb responses (8 bytes long)
+	uint8_t res:7;       // reserved/preserve
+	uint8_t rirbwprst:1; // write 1 to reset, must stop DMA engine first
+    };
+} __attribute__((packed)) rirbwp_t;
+
+#define RINTCNT         0x5a
+#define RINTCNT_LEN     0x2
+typedef union {
+    uint16_t val;
+    struct {
+	uint8_t rintcnt;  // 1=1, 2=2, but 0=256
+ 	uint8_t res;    // reserved/preserve
+    };
+} __attribute__((packed)) rintcnt_t;
+
+#define RIRBCTL         0x5c
+#define RIRBCTL_LEN     0x1
+typedef union {
+    uint8_t val;
+    struct {
+	uint8_t rintctl:1;    // write 1 to generate interrupt after n responses or empry response slot on input
+	uint8_t rirbdmaen:1;  // write 1 to make DMA engine spin
+	uint8_t rirboic:1;    // write 1 => generate interrupt on response overrun interrupt status bit
+    };
+} __attribute__((packed)) rirbctl_t;
+
+#define RIRBSTS         0x5d
+#define RIRBSTS_LEN     0x1
+typedef union {
+    uint8_t val;
+    struct {
+	uint8_t rintfl:1;   // reads as 1 when interrupt generated after n responses or empty slot, clear by writing 1
+	uint8_t res1:1;     // must be zero
+	uint8_t rirbois:1;  // reads as 1 when rirb is overrun, clear by writing 1
+	uint8_t res2:5;     // must be zero
+    };
+} __attribute__((packed)) rirbsts_t;
+
+#define RIRBSIZE         0x5e
+#define RIRBSIZE_LEN     0x1
+typedef union {
+    uint8_t val;
+    struct {
+	uint8_t rirbsize:2;
+#define RIRBSIZE_DECODE(x) ((x->rirbsize==0 ? 2 : x->rirsize==1 ? 16 : x->rirbsize==2 : 256 : 0))
+	uint8_t res:2;    // preserve
+	uint8_t rirbszcap:4; // read onlye
+#define RIRBSIZECAP_HAS_2(x) (!!(x.rirbszcap & 0x1))
+#define RIRBSIZECAP_HAS_16(x) (!!(x.rirbszcap & 0x2))
+#define RIRBSIZECAP_HAS_256(x) (!!(x.rirbszcap & 0x4))
+    };
+} __attribute__((packed)) rirbsize_t;
+
+
+
+typedef struct {
+    int valid;
+    // codec state goes here
+} codec_state_t;
+
+#define MAX_CORB_ENTRIES 256
+typedef union {
+    uint32_t val;
+    struct {
+	uint32_t verb:20;   // actual command
+	uint8_t nid:7;      // node id, node 0=>root
+	uint8_t indirect:1; // indirect node ref
+	uint8_t CAd:4;      // codec id (dest)
+    };
+} __attribute__((packed)) corb_entry_t;
+typedef corb_entry_t codec_req_t;
+
+typedef struct {
+    corb_entry_t buf[MAX_CORB_ENTRIES];
+    int size; // actual number of entries used
+    int cur_write; // our write pointer for comparison with its read pointer
+} __attribute__((aligned(128))) corb_state_t;
+
+#define MAX_RIRB_ENTRIES 256
+typedef struct {
+    uint32_t resp;
+    union {
+	uint32_t val;
+	struct {
+	    uint8_t  codec:4;
+	    uint8_t  unsol:1; // unsolicited response
+	    uint32_t res:27;
+	};
+    } resp_ex;
+} __attribute__((packed)) rirb_entry_t;
+typedef rirb_entry_t codec_resp_t;
+
+typedef struct {
+    rirb_entry_t buf[MAX_RIRB_ENTRIES];
+    int size; // actual number of entries used
+    int cur_read; // current read pointer (where driver is)
+} __attribute__((aligned(128))) rirb_state_t;
+
 
 struct hda_pci_dev {
   // for protection of per-device state
@@ -87,8 +336,83 @@ struct hda_pci_dev {
   // if at all
   uint64_t  mem_start;
   uint64_t  mem_end;
-  
+
+    // copies of state handy to keep, should do similar for each codec
+    gcap_t   gcap;
+    vmin_t   vmin;
+    vmaj_t   vmaj;
+    outpay_t outpay;
+    inpay_t  inpay;
+
+    // per codec state
+    codec_state_t codecs[SDIMAX];
+
+    corb_state_t corb;  // command output ring buffer
+    rirb_state_t rirb;  // response input ring buffer
+    
 };
+
+
+// Codec requests
+
+#define MAKE_VERB_8(id,payload)  ((((uint32_t)(id))<<8 ) | (((uint32_t)(payload))&0xff))
+#define MAKE_VERB_16(id,payload) ((((uint32_t)(id))<<16) | (((uint32_t)(payload))&0xffff))
+
+// 12 bit identifiers (8 bits payload)
+#define GET_PARAM   0xf00
+#define GET_CONSEL  0xf01
+#define SET_CONSEL  0x701
+#define GET_CONLIST 0xf02
+#define GET_PROCSTATE 0xf03
+#define SET_PROCSTATE 0x703
+// ignoring S/PDIF stuff here
+// ignoring power state stuff here
+#define GET_CONVCTL   0xf06
+#define SET_CONVCTL   0x706
+#define GET_SDISEL    0xf04
+#define SET_SDISEL    0x704
+#define GET_PINWGTCTL 0xf07
+#define SET_PINWGTCTL 0x707
+#define GET_CONSELCTL 0xf08
+#define SET_CONSELCTL 0x708
+#define GET_PINSENSE  0xf09
+#define EXE_PINSENSE  0x709
+#define GET_EAPDBTLEN 0xf0c
+#define SET_EAPDBTLEN 0xf0c
+//
+// skipping... a lot of GPIO stuff, Beep Generation, Volume Knob
+//
+#define GET_IMPLID  0xf20
+// skipping... more
+
+// 4 bit identifiers (16 bits payload)
+#define GET_COEFFIDX  0xd 
+#define SET_COEFFIDX  0x5 
+#define GET_COEFF     0xc
+#define SET_COEFF     0x4
+#define GET_GAINMUTE  0xb
+#define SET_GAINMUTE  0x3
+#define GET_CONVFMT   0xa
+#define SET_CONVFMT   0x2
+
+
+// parameters
+#define VENDOR      0x0 // also includes device id
+#define REVISION    0x2
+#define SUBORD_NODE_COUNT 0x4
+#define FUNC_GROUP_TYPE   0x5
+#define AUDIO_FUNC_GROUP_CAPS        0x8
+#define AUDIO_WIDGET_CAPS            0x9
+#define PCM_SIZES_AND_RATES          0xa // needed for playback/recording
+#define STREAM_FORMATS               0xb // ""
+#define PIN_CAPS                     0xc
+#define AMP_CAPS                     0xd
+#define CON_LIST_LEN                 0xe
+#define POWER_STATES                 0xf
+#define PROC_CAPS                    0x10
+#define GPIO_COUNT                   0x11
+#define VOL_KNOB_CAPS                0x13
+   
 
 // accessor functions for device registers
 
@@ -101,6 +425,7 @@ static inline uint32_t hda_pci_read_regl(struct hda_pci_dev *dev, uint32_t offse
   } else {
     result = inl(dev->ioport_start+offset);
   }
+    DEBUG_REGS("readl %08x returns %08x\n",offset,result);
   return result;
 }
 
@@ -113,6 +438,7 @@ static inline uint16_t hda_pci_read_regw(struct hda_pci_dev *dev, uint32_t offse
   } else {
     result = inw(dev->ioport_start+offset);
   }
+    DEBUG_REGS("readw %08x returns %04x\n",offset,result);
   return result;
 }
 
@@ -125,11 +451,13 @@ static inline uint8_t hda_pci_read_regb(struct hda_pci_dev *dev, uint32_t offset
   } else {
     result = inb(dev->ioport_start+offset);
   }
+    DEBUG_REGS("readb %08x returns %02x\n",offset,result);
   return result;
 }
 
 static inline void hda_pci_write_regl(struct hda_pci_dev *dev, uint32_t offset, uint32_t data)
 {
+    DEBUG_REGS("writel %08x with %08x\n",offset,data);
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
     __asm__ __volatile__ ("movl %1, (%0)" : : "r"(addr), "r"(data) : "memory");
@@ -140,6 +468,7 @@ static inline void hda_pci_write_regl(struct hda_pci_dev *dev, uint32_t offset, 
 
 static inline void hda_pci_write_regw(struct hda_pci_dev *dev, uint32_t offset, uint16_t data)
 {
+    DEBUG_REGS("writew %08x with %04x\n",offset,data);
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
      __asm__ __volatile__ ("movw %1, (%0)" : : "r"(addr), "r"(data) : "memory");
@@ -150,6 +479,7 @@ static inline void hda_pci_write_regw(struct hda_pci_dev *dev, uint32_t offset, 
 
 static inline void hda_pci_write_regb(struct hda_pci_dev *dev, uint32_t offset, uint8_t data)
 {
+    DEBUG_REGS("writeb %08x with %02x\n",offset,data);
   if (dev->method==MEMORY) { 
     uint64_t addr = dev->mem_start + offset;
     __asm__ __volatile__ ("movb %1, (%0)" : : "r"(addr), "r"(data) : "memory"); 
@@ -333,29 +663,446 @@ static void hda_discover_codecs(struct hda_pci_dev *dev)
   statests = hda_pci_read_regw(dev, STATESTS);
   DEBUG("Statests Value after delay: %x\n", statests);
 }
+
+static void get_caps(struct hda_pci_dev *d)
+{
+    d->gcap.val = hda_pci_read_regw(d,GCAP);
+    d->vmin = hda_pci_read_regb(d,VMIN);
+    d->vmaj = hda_pci_read_regb(d,VMAJ);
+    d->outpay = hda_pci_read_regw(d,OUTPAY);
+    d->inpay = hda_pci_read_regw(d,INPAY);
+
+    DEBUG("device is version 0x%x.0x%x %s with %d input words/frame, %d output words/frame\n",
+	  d->vmaj,d->vmin,d->gcap.ok64 ? "64ok" : "32only", d->inpay,d->outpay);
+    DEBUG("  %d output streams, %d input streams, %d bidir streams, and %d sdos\n",
+	  d->gcap.oss, d->gcap.iss, d->gcap.bss, NUM_SDO(d->gcap));
+}
+
+static void reset(struct hda_pci_dev *d)
+{
+    gctl_t gctl;
+
+
+    // verify that corb/rirb run are off (0) and stream runs are off (0)
+    
+    gctl.val = hda_pci_read_regl(d,GCTL);
+
+    DEBUG("Initial gctl = %08x\n", gctl.val);
+    
+    gctl.crst = 0;
+
+    hda_pci_write_regl(d,GCTL,gctl.val); // assert reset
+
+    DEBUG("reset asserted\n");
+
+    udelay(1000); // wait a beat - probably need non-magic number here
+
+    gctl.crst = 1;
+
+    hda_pci_write_regl(d,GCTL,gctl.val); // deassert reset
+
+    DEBUG("reset deasserted\n");
+    
+    // now wait for it to finish
+    do {
+	gctl.val = hda_pci_read_regl(d,GCTL);
+    } while (gctl.crst != 1);
+
+    DEBUG("reset completed, gctl = %08x\n",gctl.val);
+
+    // hack force it low in case manual is wrong
+    
+    
+}
+
+
+// Assumption: reset has occured just before this
+// in which case the codecs must have checked in by now
+static void discover_codecs(struct hda_pci_dev *d)
+{
+    statests_t s;
+    int i;
+
+    s.val = hda_pci_read_regw(d,STATESTS);
+
+    DEBUG("statests = %x\n",s.val);
+    
+    for (i=0;i<SDIMAX;i++) {
+	if (SDIWAKE(s,i)) {
+	    DEBUG("codec %d exists\n", i);
+	    d->codecs[i].valid = 1;
+	}
+    }
+}
+
+static void setup_corb(struct hda_pci_dev *d)
+{
+    corbctl_t cc;
+    corbsize_t cs;
+
+    cc.val = hda_pci_read_regb(d,CORBCTL);
+    cc.corbrun = 0; // turn off dma
+    hda_pci_write_regb(d,CORBCTL,cc.val);
+    DEBUG("CORB stopped\n");
+
+    cs.val = hda_pci_read_regb(d,CORBSIZE);
+    if (CORBSIZECAP_HAS_256(cs)) {
+	d->corb.size = 256;
+	cs.corbsize = 2;
+    } else if (CORBSIZECAP_HAS_16(cs)) {
+	d->corb.size = 16;
+	cs.corbsize = 1;
+    } else if (CORBSIZECAP_HAS_2(cs)) {
+	d->corb.size = 2;
+	cs.corbsize = 0;
+    } else {
+	// uh?
+	d->corb.size = 256;
+	cs.corbsize = 2;
+    }
+    hda_pci_write_regb(d,CORBSIZE,cs.val);
+    DEBUG("CORB size set to %d\n",d->corb.size);
+
+    corbubase_t cu = (uint32_t)(((uint64_t)d->corb.buf)>>32);
+    corblbase_t cl = (uint32_t)(((uint64_t)d->corb.buf));
+
+    hda_pci_write_regl(d,CORBUBASE,cu);
+    hda_pci_write_regl(d,CORBLBASE,cl);
+
+    DEBUG("CORB DMA address set to %x:%x (%p)\n",cu,cl,d->corb.buf);
+
+    d->corb.cur_write=0;  // we will advance this to 1 on first queue
+
+    corbrp_t rp;
+
+    rp.val = hda_pci_read_regw(d,CORBRP);
+    rp.corbrprst = 1;
+    rp.corbrp = 0;
+    hda_pci_write_regw(d,CORBRP,rp.val);
+    // now wait for reset to "take"
+    do { rp.val = hda_pci_read_regw(d,CORBRP); } while (!rp.corbrprst);
+    // now write it again, with reset off
+    rp.corbrprst = 0;
+    rp.corbrp = 0;
+    hda_pci_write_regw(d,CORBRP,rp.val);
+    // now wait for reset-off to "take"
+    do { rp.val = hda_pci_read_regw(d,CORBRP); } while (rp.corbrprst);
+
+    DEBUG("CORB DMA RP is configured\n");
+
+    
+    // now reset the write pointer (apparently necessary)
+
+    corbwp_t cwp;
+
+    cwp.val = hda_pci_read_regw(d,CORBWP);
+    cwp.corbwp = 0;
+    hda_pci_write_regw(d,CORBWP,cwp.val);
+
+    DEBUG("CORB DMA WP is reset to zero\n");
+    
+    cc.val = hda_pci_read_regb(d,CORBCTL);
+    cc.corbrun = 1; // turn on dma
+    hda_pci_write_regb(d,CORBCTL,cc.val);
+    DEBUG("CORB started\n");
+    
+}
+	    
+
+static void setup_rirb(struct hda_pci_dev *d)
+{
+    rirbctl_t rc;
+    rirbsize_t rs;
+
+    rc.val = hda_pci_read_regb(d,RIRBCTL);
+    rc.rirbdmaen = 0; // turn off dma
+    hda_pci_write_regb(d,RIRBCTL,rc.val);
+    DEBUG("RIRB stopped\n");
+
+    rs.val = hda_pci_read_regb(d,RIRBSIZE);
+    if (RIRBSIZECAP_HAS_256(rs)) {
+	d->rirb.size = 256;
+	rs.rirbsize = 2;
+    } else if (RIRBSIZECAP_HAS_16(rs)) {
+	d->rirb.size = 16;
+	rs.rirbsize = 1;
+    } else if (RIRBSIZECAP_HAS_2(rs)) {
+	d->rirb.size = 2;
+	rs.rirbsize = 0;
+    } else {
+	// uh?
+	d->rirb.size = 256;
+	rs.rirbsize = 2;
+    }
+    hda_pci_write_regb(d,RIRBSIZE,rs.val);
+    DEBUG("RIRB size set to %d\n",d->rirb.size);
+
+    rirbubase_t ru = (uint32_t)(((uint64_t)d->rirb.buf)>>32);
+    rirblbase_t rl = (uint32_t)(((uint64_t)d->rirb.buf));
+
+    hda_pci_write_regl(d,RIRBUBASE,ru);
+    hda_pci_write_regl(d,RIRBLBASE,rl);
+
+    DEBUG("RIRB DMA address set to %x:%x (%p)\n",ru,rl,d->rirb.buf);
+
+    d->rirb.cur_read=0; // we will wait on slot 1 when we begin
+
+    rirbwp_t wp;
+
+    wp.val = hda_pci_read_regw(d,RIRBWP);
+    wp.rirbwprst = 1;
+    wp.rirbwp = 0;
+    hda_pci_write_regw(d,RIRBWP,wp.val);
+
+    // the RIRB does not need us to wait on the reset, or toggle it,
+    // apparently, so this is then done... 
+    
+    DEBUG("RIRB DMA WP is configured\n");
+
+    rc.val = hda_pci_read_regb(d,RIRBCTL);
+    rc.rirbdmaen = 1; // turn on dma
+    // rc.rintctl = 1; // turn on interrupts on empty 
+    // rc.rirboic = 1; // turn on interrupts on overrun
+    hda_pci_write_regb(d,RIRBCTL,rc.val);
+    DEBUG("RIRB started\n");
+    
+}
+
+static void corb_show(struct hda_pci_dev *d, int count)
+{
+    int i;
+    for (i=0;i<count;i++) {
+	DEBUG("corb[%d] = %08x\n", i, d->corb.buf[i].val);
+    }
+}
+
+
+static void corb_queue_request(struct hda_pci_dev *d, codec_req_t *r)
+{
+    corbwp_t wp;
+    corbrp_t rp;
+
+    DEBUG("corb queue 0x%08x\n",r->val);
+    
+    d->corb.cur_write = (d->corb.cur_write + 1) % d->corb.size;
+
+    // wait for a slot to open
+    // probably bogus, but shouldn't matter until we wrap around
+    do {
+	rp.val = hda_pci_read_regw(d,CORBRP);
+    } while (rp.corbrp == d->corb.cur_write);
+
+    DEBUG("corb rp=%d cur_write=%d\n",rp.corbrp,d->corb.cur_write);
+
+    d->corb.buf[d->corb.cur_write].val = r->val;
+
+    // make sure this write becomes visible to other cpus
+    // this should also make it visible to anything else that is
+    // coherent.      
+    __asm__ __volatile__ ("mfence" : : : "memory");
+
+    // maybe, but should not be needed...
+    clflush(&d->corb.buf[d->corb.cur_write].val);
+    
+    wp.val = hda_pci_read_regw(d,CORBWP);
+    wp.corbwp = (wp.corbwp + 1) % d->corb.size;
+    hda_pci_write_regw(d,CORBWP,wp.val);
+
+    DEBUG("corb request queued - wp=%d cur_write=%d\n", wp.corbwp, d->corb.cur_write);
+}
+
+static void rirb_show(struct hda_pci_dev *d, int count)
+{
+    int i;
+
+    for (i=0;i<count;i++) {
+	DEBUG("rirb[%d] = %08x %08x\n", i, d->rirb.buf[i].resp, d->rirb.buf[i].resp_ex.val);
+    }
+}
+
+static void rirb_dequeue_response(struct hda_pci_dev *d, codec_resp_t *r)
+{
+    rirbwp_t wp;
+    corbrp_t rp;
+    corbwp_t cwp;
+    corbsts_t cst;
+    corbctl_t cct;
+    
+    DEBUG("rirb dequeue response\n");
+
+    // PAD this currently spins forever because we never see
+    // the corb rp advance
+    //   this probably means the thing is still in reset
+    //   or that the corb is not actually running for some
+    //   unknown reason
+    do {
+	corb_show(d,2);
+	rirb_show(d,2);
+	wp.val = hda_pci_read_regw(d,RIRBWP);
+	rp.val = hda_pci_read_regw(d,CORBRP);
+	cwp.val = hda_pci_read_regw(d,CORBWP);
+	cst.val = hda_pci_read_regb(d,CORBSTS);
+	cct.val = hda_pci_read_regb(d,CORBCTL);
+	//DEBUG("wp=%d rp=%d\n",wp.rirbwp, rp.corbrp);
+    } while (wp.rirbwp == d->rirb.cur_read);
+
+    DEBUG("ready to dequeue - wp=%d cur_read=%d\n",wp.rirbwp, d->rirb.cur_read);
+    
+    *r = d->rirb.buf[wp.rirbwp];
+
+    d->rirb.cur_read = (d->rirb.cur_read + 1) % d->rirb.size;
+
+    DEBUG("dequeue done - response is %08x:%08x\n",r->resp,r->resp_ex.val);
+
+}
+
+static void setup_codec(struct hda_pci_dev *d, int codec)
+{
+    codec_req_t rq;
+    codec_resp_t rp;
+    
+    rq.val=0;
+
+    rq.CAd = codec;
+    rq.nid = 0; // root node
+    rq.indirect = 0;
+    rq.verb = MAKE_VERB_8(GET_PARAM,VENDOR);
+
+    corb_queue_request(d,&rq);
+    rirb_dequeue_response(d,&rp);
+
+    DEBUG("codec vendor %04x device %04x\n",rp.resp>>16 & 0xffff, rp.resp & 0xffff);
+    
+    rq.val=0;
+
+    rq.CAd = codec;
+    rq.nid = 0; // root node
+    rq.indirect = 0;
+    rq.verb = MAKE_VERB_8(GET_PARAM,REVISION);
+
+    corb_queue_request(d,&rq);
+    rirb_dequeue_response(d,&rp);
+
+    DEBUG("major %d minor %d revid %d stepping %d\n",
+	  rp.resp>>20 & 0xf,
+	  rp.resp>>16 & 0xf,
+	  rp.resp>>8  & 0xff,
+	  rp.resp>>0  & 0xff);
+	  
+
+}
+
+static void setup_codecs(struct hda_pci_dev *d)
+{
+    int i;
+    for (i=0;i<SDIMAX;i++) {
+	if (d->codecs[i].valid) {
+	    setup_codec(d,i);
+	}
+    }
+}
+
+static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
+{
+    DEBUG("We got interrupt %d\n",v);
+
+    // handle
+
+    IRQ_HANDLER_END();
+
+    return 0;
+}
+
+
+// 4.2.1 - PCI config
+//     To Do: make sure all enabled, interrupt enabled, dma enabled
+//            MSI configured
+// 4.2.2 - Reset - set CRST (+8,0), read-wait for it to flip to 1
+// 4.3   - Codecs 0 read STATESTS bits after reset to see which have
+//         flipped to 1 - these are the codecs that exist
+// 4.4   - Codec control - establish ring buffers for requests (CORB)
+///        and responses (RIRB).   Read CORBSZCAP to determine ring
+//         buf size (typically 256 entries, 4 bytes each), 128 byte aligned, coherent
+//             CORB  - WP => driver push  - RP => device pull
+//             RIRB  - WP => device push  - RP => driver pull
+//                 push => write to WP+(1,2,3,...)*4, then update WP to last entry (notify)
+//         CORB run bit => device observes CORB via DMA
+//         requests are 4 byte "verbs" that are device (codec) specific
+//         responses are 8 byte quanitities (codec number, solicited/unsolcited, 4 byte response)
+//         responses can produce interrupts (after n response pusehs, for example)
+//         request/response can be done via polling as well
+// 4.5   - Streams and channels
+
 static int bringup_device(struct hda_pci_dev *dev)
 {
   DEBUG("Bringing up device %u:%u.%u. Starting Address is: %x\n",
   dev->pci_dev->bus->num,dev->pci_dev->num,dev->pci_dev->fun, dev->mem_start);
 
-  if (dev->pci_dev->msi.type!=PCI_MSI_NONE) {
-    // switch on early (and detect - we will no do legacy or MSI-X)
-#if 0 // do interrupt setup later
-    if (pci_dev_enable_msi(dev->pci_dev)) {
-      ERROR("Failed to enable MSI on device...\n");
+  // configure interrupts
+  if (dev->pci_dev->msi.type==PCI_MSI_32 || dev->pci_dev->msi.type==PCI_MSI_64) {
+      int num_vecs = dev->pci_dev->msi.num_vectors_needed;
+      int base_vec;
+      int i;
+      
+      if (idt_find_and_reserve_range(num_vecs,1,(ulong_t*)&base_vec)) {
+	  ERROR("Unable to reserve %d interrupt table slots\n", num_vecs);
+	  return -1;
+      }
+      if (pci_dev_enable_msi(dev->pci_dev,base_vec,num_vecs,0)) {
+	  ERROR("Failed to enable MSI on device...\n");
+	  return -1;
+      }
+      for (i=base_vec;i<base_vec+num_vecs;i++) {
+	  if (register_int_handler(i,handler,dev)) {
+	      ERROR("Failed to register interrupt %d\n",i);
+	      return -1;
+	  }
+      }
+      
+      for (i=base_vec;i<base_vec+num_vecs;i++) {
+	  if (pci_dev_unmask_msi(dev->pci_dev,i)) {
+	      ERROR("Failed to unmask MSI interrupt %d\n",i);
+	      return -1;
+	  }
+      }
+      
+      DEBUG("Enabled MSI for vectors [%d,%d)\n", base_vec,base_vec+num_vecs);
+  }  else {
+      ERROR("Device does not support MSI...\n");
       return -1;
-    }
-#endif
-  } else {
-    ERROR("Device does not support MSI...\n");
-    return -1;
   }
 
+  // now make sure pci config space command register is acceptable
+  uint16_t cmd = pci_dev_cfg_readw(dev->pci_dev,0x4);
+  cmd &= ~0x0400; // turn off interrupt disable
+  cmd |= 0x7; // make sure bus master, memory and io space are enabled
+  DEBUG("writing PCI command register to 0x%x\n",cmd);
+  pci_dev_cfg_writew(dev->pci_dev,0x4,cmd);
+
+  uint16_t status = pci_dev_cfg_readw(dev->pci_dev,0x6);
+  DEBUG("reading PCI status register as 0x%x\n",status);
+  
   // Initialize device here...
 
-  // Make sure can read from device. For debugging
-  hda_test(dev);
+  get_caps(dev);
 
+  reset(dev);
+
+  discover_codecs(dev);
+
+  setup_corb(dev);
+
+  setup_rirb(dev);
+
+  setup_codecs(dev);
+  
+  // Make sure can read from device. For debugging
+  //hda_test(dev);
+
+  //hda_reset(dev);
+  
+  
+  
   // Clear STATESTS register
 	//hda_pci_write_regw(dev, STATESTS, STATESTS_INT_MASK);
   
