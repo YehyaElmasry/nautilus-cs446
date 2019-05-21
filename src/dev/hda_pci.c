@@ -335,6 +335,8 @@ typedef struct {
 } __attribute__((aligned(128))) rirb_state_t;
 
 
+
+
 struct hda_pci_dev {
   // for protection of per-device state
   spinlock_t      lock;
@@ -382,7 +384,6 @@ struct hda_pci_dev {
     rirb_state_t rirb;  // response input ring buffer
     
 };
-
 
 // Codec requests
 
@@ -1090,6 +1091,7 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
     DEBUG("Interrupt status %08x\n", is.val);
     
     // handle
+    
 
     IRQ_HANDLER_END();
 
@@ -1258,6 +1260,49 @@ int hda_pci_deinit()
   // should really scan list of devices and tear down...
   INFO("deinited\n");
   return 0;
+}
+
+#define MAX_BDL_ENTIRES 256
+#define SDnCTL 0x80
+#define LAST_VALID_INDEX 0x8C
+#define BDL_LOWER 0x98
+#define BDL_UPPER 0x9C
+
+// Buffer Descriptor List Entry
+typedef struct {
+    uint64_t address;
+    uint32_t length;
+    uint32_t ioc:1;
+    uint32_t reserved:31;
+} __attribute__((packed, aligned(128))) bdle_t;
+
+// Buffer Descriptor List
+struct hda_bdl {
+    bdle_t buf[MAX_BDL_ENTIRES];
+} __attribute__((aligned(128)));
+
+
+// Play audio from a file
+void audio_from_file(struct hda_pci_dev *dev, void *data, uint64_t size) {
+    uint16_t len = 1280000;
+    ASSERT(len*256 >= size);
+    // Make sure run is 0
+
+    // At offset 8C, set how many entries are in the BDL (must be set to at least 1)
+    // At offset 98:9C, set the address of the BDL
+
+    // Create BDL and populate it with the entries we need, set interrupt to 0
+	struct hda_bdl *bdl;
+	bdl = malloc(sizeof(struct hda_bdl));
+    uint16_t index = 0;
+    for (uint64_t start = 0; start < size; start += len) {
+        bdl->buf[index].address = ((uint64_t)data) + start;
+        bdl->buf[index].length = len;
+        bdl->buf[index].ioc = 0;
+        index++;
+    }
+
+
 }
 
 
