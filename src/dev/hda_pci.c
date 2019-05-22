@@ -837,7 +837,6 @@ static void setup_corb(struct hda_pci_dev *d)
     DEBUG("CORB started\n");
     
 }
-	    
 
 static void setup_rirb(struct hda_pci_dev *d)
 {
@@ -1262,8 +1261,63 @@ int hda_pci_deinit()
   return 0;
 }
 
+
+#define SDNCTL 0x80
+// Stream Descriptor n Control, 3 bytes
+typedef union {
+    uint32_t val;
+    struct {
+        uint8_t srst:1;     // stream reset
+        uint8_t run:1;      // stream run
+        uint8_t ioce:1;     // interrupt on completion enable
+        uint8_t feie:1;     // FIFO error interrupt enable
+        uint8_t deie:1;     // descriptor error interrupt enable
+        uint8_t resp:11;    // 15:5 reserved
+        uint8_t stripe:2;   // stripe control
+        uint8_t tp:1;       // traffic priority
+        uint8_t dir:1;      // bidirectional direction control
+        uint8_t strm:4;     // stream number
+        // rest is reserved / padding
+    };
+} __attribute__((packed)) sdncbl_t;
+
+
+// Audio data
+struct audio_data {
+    void *buffer;
+    uint64_t size;
+    char *format;
+};
+
+void start_stream(struct hda_pci_dev *dev, struct audio_data data) {
+    /* enable SIE */
+
+    /* set stripe control */
+
+    /* set DMA start (run) */ 
+    
+    /* set interrupt mask */
+}
+
+
+uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size) {
+    uint64_t len = 1280000;
+    /* if it's the first chunk and size is too small, split to have at least two entries */
+    if (current_offset == 0 && len >= total_size) {
+        return len / 2;
+    } 
+    /* if the remainder is less than len, the remainder will be an entry */
+    if (len >= total_size - current_offset) {
+        return total_size - current_offset;
+    }
+    /* If our default len is too small, use a bigger one */
+    if (total_size > len * 256) {
+        return total_size / 256;
+    }
+    return len;
+}
+
 #define MAX_BDL_ENTIRES 256
-#define SDnCTL 0x80
 #define LAST_VALID_INDEX 0x8C
 #define BDL_LOWER 0x98
 #define BDL_UPPER 0x9C
@@ -1281,29 +1335,65 @@ struct hda_bdl {
     bdle_t buf[MAX_BDL_ENTIRES];
 } __attribute__((aligned(128)));
 
-
-// Play audio from a file
-void audio_from_file(struct hda_pci_dev *dev, void *data, uint64_t size) {
-    uint16_t len = 1280000;
-    ASSERT(len*256 >= size);
-    // Make sure run is 0
-
-    // At offset 8C, set how many entries are in the BDL (must be set to at least 1)
-    // At offset 98:9C, set the address of the BDL
-
-    // Create BDL and populate it with the entries we need, set interrupt to 0
-	struct hda_bdl *bdl;
+void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data) {
+    assert(data.size & 0x3F == 0);
+    /* split the data into BDL entries */
+    struct hda_bdl *bdl;
 	bdl = malloc(sizeof(struct hda_bdl));
     uint16_t index = 0;
-    for (uint64_t start = 0; start < size; start += len) {
-        bdl->buf[index].address = ((uint64_t)data) + start;
-        bdl->buf[index].length = len;
+    uint64_t curr_offset = 0;
+    while (data.size >= curr_offset) {
+        uint64_t chunksize = get_chunk_size(curr_offset, data.size) & 0x80;
+        curr_offset += chunksize;
+        bdl->buf[index].address = ((uint64_t)data.buffer) + curr_offset;
+        bdl->buf[index].length = chunksize;
+        /* we don't want interupts */
         bdl->buf[index].ioc = 0;
         index++;
     }
+    /* program the stream LVI (last valid index) of the BDL */
+    uint16_t LVI = hda_pci_read_regw(dev, LAST_VALID_INDEX);
+    LVI &= 0xFF00;
+    LVI |= index - 1;
+    hda_pci_write_regw(dev, LAST_VALID_INDEX, LVI);
 
+    /* program the BDL address */
+    uint32_t bdl_u = (uint32_t)(((uint64_t)bdl)>>32);
+    uint32_t bdl_l = ((uint32_t)(((uint64_t)bdl))) & 0xFFC0 ;
+
+    hda_pci_write_regl(dev, BDL_LOWER, bdl_l);
+    hda_pci_write_regl(dev, BDL_UPPER, bdl_u);    
+}
+
+void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
+    /* make sure the run bit is zero for SD */  
+
+    /* program the stream_tag */
+
+    /* program the length of samples in cyclic buffer */
+
+    /* program the stream format */
+
+    /* initialize BDL */
+    initialize_bdl(dev, data);
+
+    /* enable the position buffer */
+
+    /* set the interrupt enable bits in the descriptor control register */
 
 }
 
+/* function to call externally to play audio */
+void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size, char *format) {
+    /* package up a struct */
+    struct audio_data data;
+    data.buffer = buffer;
+    data.size = size;
+    data.format = format;
+    
+    /* setup stream */
+    setup_stream(dev, data);
 
-
+    /* start stream */
+    start_stream(dev, data);
+}
