@@ -1,1 +1,1 @@
-qemu-system-x86_64 -smp 2 -m 2048 -vga std -serial stdio -soundhw hda -cdrom nautilus.iso
+qemu-system-x86_64 -smp 2 -m 2048 -vga std -serial file:log.txt -monitor stdio -global intel-hda.debug=1 -device intel-hda,debug=1 -device hda-duplex,debug=1 -cdrom nautilus.iso
