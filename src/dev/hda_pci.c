@@ -337,7 +337,7 @@ typedef union
         uint8_t nid: 7;     // node id, node 0=>root
         uint8_t indirect: 1; // indirect node ref
         uint8_t CAd: 4;     // codec id (dest)
-    };
+    } __attribute__((packed)) ;
 } __attribute__((packed)) corb_entry_t;
 typedef corb_entry_t codec_req_t;
 
@@ -360,8 +360,8 @@ typedef struct
             uint8_t  codec: 4;
             uint8_t  unsol: 1; // unsolicited response
             uint32_t res: 27;
-        };
-    } resp_ex;
+        } __attribute__((packed)) ;
+    } __attribute__((packed)) resp_ex ;
 } __attribute__((packed)) rirb_entry_t;
 typedef rirb_entry_t codec_resp_t;
 
@@ -467,10 +467,10 @@ struct hda_pci_dev
 
 
 // parameters
-#define VENDOR                       0x0 // also includes device id
-#define REVISION                     0x2
-#define SUBORD_NODE_COUNT            0x4
-#define FUNC_GROUP_TYPE              0x5
+#define VENDOR      0x0 // also includes device id
+#define REVISION    0x2
+#define SUBORD_NODE_COUNT 0x4
+#define FUNC_GROUP_TYPE   0x5
 #define AUDIO_FUNC_GROUP_CAPS        0x8
 #define AUDIO_WIDGET_CAPS            0x9
 #define PCM_SIZES_AND_RATES          0xa // needed for playback/recording
@@ -793,7 +793,6 @@ static void reset(struct hda_pci_dev *d)
 {
     gctl_t gctl;
 
-
     // verify that corb/rirb run are off (0) and stream runs are off (0)
 
     gctl.val = hda_pci_read_regl(d, GCTL);
@@ -826,7 +825,6 @@ static void reset(struct hda_pci_dev *d)
 
 }
 
-
 // Assumption: reset has occured just before this
 // in which case the codecs must have checked in by now
 static void discover_codecs(struct hda_pci_dev *d)
@@ -856,13 +854,6 @@ static void setup_corb(struct hda_pci_dev *d)
     cc.val = hda_pci_read_regb(d, CORBCTL);
     cc.corbrun = 0; // turn off dma
     hda_pci_write_regb(d, CORBCTL, cc.val);
-    
-    // Read back per the manual
-    do
-    {
-        cc.val = hda_pci_read_regb(d, CORBCTL);
-    } while (cc.corbrun != 0);
-
     DEBUG("CORB stopped\n");
 
     cs.val = hda_pci_read_regb(d, CORBSIZE);
@@ -904,7 +895,7 @@ static void setup_corb(struct hda_pci_dev *d)
 
     rp.val = hda_pci_read_regw(d, CORBRP);
     rp.corbrprst = 1;
-    //rp.corbrp = 0; // READ ONLY
+    rp.corbrp = 0;
     hda_pci_write_regw(d, CORBRP, rp.val);
     // now wait for reset to "take"
     do
@@ -914,7 +905,7 @@ static void setup_corb(struct hda_pci_dev *d)
     while (!rp.corbrprst);
     // now write it again, with reset off
     rp.corbrprst = 0;
-    //rp.corbrp = 0; // READ ONLY
+    rp.corbrp = 0;
     hda_pci_write_regw(d, CORBRP, rp.val);
     // now wait for reset-off to "take"
     do
@@ -952,11 +943,6 @@ static void setup_rirb(struct hda_pci_dev *d)
     rc.val = hda_pci_read_regb(d, RIRBCTL);
     rc.rirbdmaen = 0; // turn off dma
     hda_pci_write_regb(d, RIRBCTL, rc.val);
-    do
-    {
-        rc.val = hda_pci_read_regb(d, RIRBCTL);
-    } while (rc.rirbdmaen != 0);
-    
     DEBUG("RIRB stopped\n");
 
     rs.val = hda_pci_read_regb(d, RIRBSIZE);
@@ -998,7 +984,7 @@ static void setup_rirb(struct hda_pci_dev *d)
 
     wp.val = hda_pci_read_regw(d, RIRBWP);
     wp.rirbwprst = 1;
-    //wp.rirbwp = 0; // READ ONLY
+    wp.rirbwp = 0;
     hda_pci_write_regw(d, RIRBWP, wp.val);
 
     // the RIRB does not need us to wait on the reset, or toggle it,
@@ -1032,10 +1018,6 @@ static void corb_show(struct hda_pci_dev *d, int count)
     for (i = 0; i < count; i++)
     {
         DEBUG("corb[%d] = %08x\n", i, d->corb.buf[i].val);
-        if(d->corb.buf[i].val)
-        {
-            DEBUG("NOT ZERO!!\n");
-        }
     }
 }
 
@@ -1057,8 +1039,8 @@ static void corb_queue_request(struct hda_pci_dev *d, codec_req_t *r)
     }
     while (rp.corbrp == d->corb.cur_write);
 
-    DEBUG("corb rp=%d cur_write=%d\n",rp.corbrp,d->corb.cur_write);
-    
+    //DEBUG("corb rp=%d cur_write=%d\n",rp.corbrp,d->corb.cur_write);
+
     d->corb.buf[d->corb.cur_write].val = r->val;
 
     // make sure this write becomes visible to other cpus
@@ -1068,27 +1050,11 @@ static void corb_queue_request(struct hda_pci_dev *d, codec_req_t *r)
 
     // maybe, but should not be needed...
     clflush(&d->corb.buf[d->corb.cur_write].val);
-    
-    /*
+
     wp.val = hda_pci_read_regw(d, CORBWP);
     wp.corbwp = (wp.corbwp + 1) % d->corb.size;
     hda_pci_write_regw(d, CORBWP, wp.val);
-    */
 
-    wp.val = hda_pci_read_regw(d, CORBWP);
-    DEBUG("Corb WP before write is: %d\n", wp.corbwp);
-    wp.corbwp = (wp.corbwp + 1) % d->corb.size;
-    //wp.corbwp = (wp.corbwp + 1) % d->corb.size;
-    
-    //rp.val = hda_pci_read_regw(d, CORBRP);
-    //DEBUG("Corb RP before write is: %d\n", rp.corbrp);
-    
-    //DEBUG("Corb WP after write is: %d\n", wp.corbwp);
-    hda_pci_write_regw(d, CORBWP, wp.val);
-
-    //rp.val = hda_pci_read_regw(d, CORBRP);
-    //DEBUG("Corb RP after write is: %d\n", rp.corbrp);
-    
     //DEBUG("corb request queued - wp=%d cur_write=%d\n", wp.corbwp, d->corb.cur_write);
 }
 
@@ -1099,10 +1065,6 @@ static void rirb_show(struct hda_pci_dev *d, int count)
     for (i = 0; i < count; i++)
     {
         DEBUG("rirb[%d] = %08x %08x\n", i, d->rirb.buf[i].resp, d->rirb.buf[i].resp_ex.val);
-        if(d->rirb.buf[i].resp || d->rirb.buf[i].resp_ex.val)
-        {
-            DEBUG("NOT ZERO!!\n");  
-        }
     }
 }
 
@@ -1114,27 +1076,26 @@ static void rirb_dequeue_response(struct hda_pci_dev *d, codec_resp_t *r)
     corbsts_t cst;
     corbctl_t cct;
 
-    DEBUG("rirb dequeue response\n");
+    //DEBUG("rirb dequeue response\n");
 
     do
     {
-        corb_show(d,4);
-        rirb_show(d,4);
+        //corb_show(d,2);
+        //rirb_show(d,2);
         wp.val = hda_pci_read_regw(d, RIRBWP);
-        rp.val = hda_pci_read_regw(d,CORBRP);
-        cwp.val = hda_pci_read_regw(d,CORBWP);
-        cst.val = hda_pci_read_regb(d,CORBSTS);
-        cct.val = hda_pci_read_regb(d,CORBCTL);
-        DEBUG("rirb wp=%d corb rp=%d corb wp=%d corbsts=%d corbctl=%x\n", wp.rirbwp, rp.corbrp, cwp.corbwp, cst.val, cct.val);
-        //DEBUG("rirb wp=%d corb rp=%d\n", wp.rirbwp, rp.corbrp);
+        //rp.val = hda_pci_read_regw(d,CORBRP);
+        //cwp.val = hda_pci_read_regw(d,CORBWP);
+        //cst.val = hda_pci_read_regb(d,CORBSTS);
+        //cct.val = hda_pci_read_regb(d,CORBCTL);
+        //DEBUG("wp=%d rp=%d\n",wp.rirbwp, rp.corbrp);
     }
     while (wp.rirbwp == d->rirb.cur_read);
 
 
     //DEBUG("ready to dequeue - rirb wp=%d rirb cur_read=%d\n",wp.rirbwp, d->rirb.cur_read);
 
-    //corb_show(d, 32);
-    //rirb_show(d, 32);
+    //corb_show(d,32);
+    //rirb_show(d,32);
 
     *r = d->rirb.buf[wp.rirbwp];
 
@@ -1168,10 +1129,7 @@ static void transact(struct hda_pci_dev *d, int codec, int nid, int indirect, ui
     rq.nid = nid;
     rq.indirect = indirect;
     rq.verb = verb;
-    
     corb_queue_request(d, &rq);
-    //corb_queue_request(d, &rq);
-
     rirb_dequeue_response(d, rp);
 }
 
@@ -1181,62 +1139,20 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
     codec_resp_t rp;
     int node = 0;
     int root_node = 0;
+    int start_node = 0;
+    int n_nodes = 0;
 
-    DEBUG("BEFORE SENDING ANY REQUESTS:\n");
-    rirb_entry_t e;
-    e.resp = 0xBEEFDEAD;
-    e.resp_ex.val = 0xDEADBEEF;
+    transact(d, codec, root_node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
+    DEBUG("Interrogating root node. Codec vendor %04x device %04x\n", rp.resp >> 16 & 0xffff, rp.resp & 0xffff);
+    transact(d, codec, root_node, 0, MAKE_VERB_8(GET_PARAM, SUBORD_NODE_COUNT), &rp);
+    DEBUG("Getting subordinate nodes information from root node. Starting node: %d total nodes: %d\n", rp.resp >> 16 & 0xff, rp.resp & 0xff);
 
-    int i;
-    for (i = 0; i < 256; i++)
+    start_node = rp.resp >> 16 & 0xff;
+    n_nodes = rp.resp & 0xff;
+    
+    for(node = start_node; node < start_node + n_nodes; node++)
     {
-        d->rirb.buf[i] = e;
-        d->corb.buf[i].val = 0x000f0000;  
-    }
-
-    corb_show(d, 4);
-    rirb_show(d, 4);
-
-    DEBUG("Initiating transaction...\n");
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    /*
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    //DEBUG("AFTER REQUEST(S):\n");
-    corb_show(d, 20);
-    rirb_show(d, 20);
-    */
-    /*
-    DEBUG("Setting up codect %d...\n", codec);
-    
-    DEBUG("Interrogating codec %d root node (node 0)...\n", codec);
-    
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
-    DEBUG("codec vendor %04x device %04x\n", rp.resp >> 16 & 0xffff, rp.resp & 0xffff);
-
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, REVISION), &rp);
-    DEBUG("major %d minor %d revid %d stepping %d\n",
-            rp.resp >> 20 & 0xf,
-            rp.resp >> 16 & 0xf,
-            rp.resp >> 8  & 0xff,
-            rp.resp >> 0  & 0xff);
-
-
-    transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, SUBORD_NODE_COUNT), &rp);
-    DEBUG("starting node %d total nodes %d\n", rp.resp >> 16 & 0xff, rp.resp & 0xff);
-    
-    for (node = 0; node < 256; node++)
-    {
-        DEBUG("NODE %d================================================\n", node);
+        DEBUG("============================NODE %d===========================\n", node);
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
         DEBUG("codec vendor %04x device %04x\n", rp.resp >> 16 & 0xffff, rp.resp & 0xffff);
 
@@ -1271,7 +1187,8 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, STREAM_FORMATS), &rp);
         DEBUG("stream formats %08x\n", rp.resp);
     }
-    */
+    
+    
 }
 
 static void setup_codecs(struct hda_pci_dev *d)
@@ -1290,13 +1207,13 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
 {
     struct hda_pci_dev *d = (struct hda_pci_dev *) priv_data;
 
-    DEBUG("We got interrupt %d for device at %p\n", v, d);
+    //DEBUG("We got interrupt %d for device at %p\n", v, d);
 
     intsts_t is;
 
     is.val = hda_pci_read_regl(d, INTSTS);
 
-    DEBUG("Interrupt status %08x\n", is.val);
+    //DEBUG("Interrupt status %08x\n", is.val);
 
     // handle
 
