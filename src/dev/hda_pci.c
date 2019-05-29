@@ -51,11 +51,10 @@
 #define STATE_LOCK(state) _state_lock_flags = spin_lock_irq_save(&(state->lock))
 #define STATE_UNLOCK(state) spin_unlock_irq_restore(&(state->lock), _state_lock_flags)
 
-#define assert(cond) if (!cond) ERROR("Assert failed in ")
 #define assert(cond) \
     if (cond) {} \
     else { \
-    ERROR("Assert failed in %s: %d", __FILE__, __LINE__);\
+    ERROR("Assert failed in %s: %d\n", __FILE__, __LINE__);\
     }\
 //
 // On QEMU using -soundhw hda we see the following:
@@ -1321,6 +1320,9 @@ static int bringup_device(struct hda_pci_dev *dev)
 
     setup_codecs(dev);
 
+    void *buf = malloc(512);
+    audio_from_buffer(dev, buf, 512, (char *) "hi");
+
     // Make sure can read from device. For debugging
     //hda_test(dev);
 
@@ -1411,27 +1413,30 @@ int hda_pci_deinit()
 typedef union {
     uint32_t val;
     struct {
+        uint8_t padding:8;  // least significant byte is unimportant
         uint8_t srst:1;     // stream reset
         uint8_t run:1;      // stream run
         uint8_t ioce:1;     // interrupt on completion enable
         uint8_t feie:1;     // FIFO error interrupt enable
         uint8_t deie:1;     // descriptor error interrupt enable
-        uint16_t resv:11;    // 15:5 reserved
+        uint16_t resv:11;   // 15:5 reserved
         uint8_t stripe:2;   // stripe control
         uint8_t tp:1;       // traffic priority
         uint8_t dir:1;      // bidirectional direction control
-        uint8_t strm:4;     // stream number
-        // rest is reserved / padding
+        uint8_t strm_num:4; // stream number
     }__attribute__((packed));
-} __attribute__((packed)) sdncbl_t;
+} __attribute__((packed)) sdnctl_t;
 
+// Cyclic buffer length
+#define SDNCBL 0x88
+typedef uint32_t sdcbl_t;
 
 // Audio data
 struct audio_data {
     void *buffer;
     uint64_t size;
     char *format;
-};
+}__attribute__((packed));
 
 void start_stream(struct hda_pci_dev *dev, struct audio_data data) {
     /* enable SIE */
@@ -1468,10 +1473,10 @@ uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size) {
 
 // Buffer Descriptor List Entry
 typedef struct {
-    uint64_t address;
-    uint32_t length;
-    uint32_t ioc:1;
     uint32_t reserved:31;
+    uint32_t ioc:1;
+    uint32_t length:32;
+    uint64_t address:64;
 } __attribute__((packed, aligned(128))) bdle_t;
 
 // Buffer Descriptor List
@@ -1480,14 +1485,15 @@ struct hda_bdl {
 } __attribute__((aligned(128)));
 
 void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data) {
-    assert((data.size & 0x3F) == 0);
+    assert((data.size & 0x3F) == 0); // Ensure 128-byte aligned
+    
     /* split the data into BDL entries */
     struct hda_bdl *bdl;
 	bdl = malloc(sizeof(struct hda_bdl));
     uint16_t index = 0;
     uint64_t curr_offset = 0;
     while (data.size >= curr_offset) {
-        uint64_t chunksize = get_chunk_size(curr_offset, data.size) & 0x80;
+        uint64_t chunksize = get_chunk_size(curr_offset, data.size);
         curr_offset += chunksize;
         bdl->buf[index].address = ((uint64_t)data.buffer) + curr_offset;
         bdl->buf[index].length = chunksize;
@@ -1497,34 +1503,56 @@ void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data) {
     }
     /* program the stream LVI (last valid index) of the BDL */
     uint16_t LVI = hda_pci_read_regw(dev, LAST_VALID_INDEX);
-    LVI &= 0xFF00;
+    LVI &= 0xFF00; // Preserve bits [15:8]
     LVI |= index - 1;
     hda_pci_write_regw(dev, LAST_VALID_INDEX, LVI);
 
     /* program the BDL address */
     uint32_t bdl_u = (uint32_t)(((uint64_t)bdl)>>32);
-    uint32_t bdl_l = ((uint32_t)(((uint64_t)bdl))) & 0xFFC0 ;
+    uint32_t bdl_l = ((uint32_t)(((uint64_t)bdl))) & 0xFFC0 ; // TODO: Make sure correct.
 
     hda_pci_write_regl(dev, BDL_LOWER, bdl_l);
     hda_pci_write_regl(dev, BDL_UPPER, bdl_u);    
 }
 
+#define DPLBASE 0x70
+typedef struct {
+    
+} __attribute__((packed, aligned(128))) dplbase_t;
+
 void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
-    /* make sure the run bit is zero for SD */  
+    /* make sure the run bit is zero for SD */
+    sdnctl_t sd_control;
+    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
+    DEBUG("SD control: %08x\n", sd_control.val);
+    DEBUG("SD control strmnum: %d\n", sd_control.strm_num);
+    sd_control.run = 0;
+    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
 
     /* program the stream_tag */
+    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
+    sd_control.strm_num = 2;  // TODO: Change
+    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
 
     /* program the length of samples in cyclic buffer */
+    sdcbl_t sd_cbl = data.size;
+    hda_pci_write_regl(dev, SDNCTL, sd_cbl);
 
     /* program the stream format */
+    // Not doing anything now. Stick with defaults
 
     /* initialize BDL */
     initialize_bdl(dev, data);
 
     /* enable the position buffer */
+    // TODO: Need to enable?
 
     /* set the interrupt enable bits in the descriptor control register */
-
+    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
+    sd_control.deie = 0;
+    sd_control.feie = 0;
+    sd_control.ioce = 0;
+    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
 }
 
 /* function to call externally to play audio */
