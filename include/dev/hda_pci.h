@@ -39,7 +39,7 @@ int hda_pci_deinit();
 #define MINOR       0x02
 #define MAJOR       0x03
 #define GLOB_CTRL   0x08
-#define STATESTS    0x0E
+//#define STATESTS    0x0E
 
 // Bits masks within registers
 #define CRST_MASK           0x1
