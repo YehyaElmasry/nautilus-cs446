@@ -1144,6 +1144,8 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
     int root_node = 0;
     int start_node = 0;
     int n_nodes = 0;
+    int subnodes = 0;
+    int n_subnodes = 0;
 
     transact(d, codec, root_node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
     DEBUG("Interrogating root node. Codec vendor %04x device %04x\n", rp.resp >> 16 & 0xffff, rp.resp & 0xffff);
@@ -1152,7 +1154,7 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
 
     start_node = rp.resp >> 16 & 0xff;
     n_nodes = rp.resp & 0xff;
-    
+
     for(node = start_node; node < start_node + n_nodes; node++)
     {
         DEBUG("============================NODE %d===========================\n", node);
@@ -1169,6 +1171,8 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
 
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, SUBORD_NODE_COUNT), &rp);
         DEBUG("starting node %d total nodes %d\n", rp.resp >> 16 & 0xff, rp.resp & 0xff);
+        subnodes = rp.resp >> 16 & 0xff;
+        n_subnodes = rp.resp & 0xff;
 
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, FUNC_GROUP_TYPE), &rp);
         DEBUG("func group type %x unsol %d\n", rp.resp & 0xff, rp.resp >> 8 & 0x1);
@@ -1189,9 +1193,50 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
 
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, STREAM_FORMATS), &rp);
         DEBUG("stream formats %08x\n", rp.resp);
+        
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, PIN_CAPS), &rp);
+        DEBUG("pin caps %08x\n", rp.resp);
     }
-    
-    
+
+    for(node = subnodes; node < subnodes + n_subnodes; node++)
+    {
+        DEBUG("============================NODE %d===========================\n", node);
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, VENDOR), &rp);
+        DEBUG("codec vendor %04x device %04x\n", rp.resp >> 16 & 0xffff, rp.resp & 0xffff);
+
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, REVISION), &rp);
+        DEBUG("major %d minor %d revid %d stepping %d\n",
+              rp.resp >> 20 & 0xf,
+              rp.resp >> 16 & 0xf,
+              rp.resp >> 8  & 0xff,
+              rp.resp >> 0  & 0xff);
+
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, SUBORD_NODE_COUNT), &rp);
+        DEBUG("starting node %d total nodes %d\n", rp.resp >> 16 & 0xff, rp.resp & 0xff);
+        
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, FUNC_GROUP_TYPE), &rp);
+        DEBUG("func group type %x unsol %d\n", rp.resp & 0xff, rp.resp >> 8 & 0x1);
+
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, AUDIO_FUNC_GROUP_CAPS), &rp);
+        DEBUG("audio caps beep %d input delay %d output delay %d\n", rp.resp & 0x10000, rp.resp >> 8 & 0xf, rp.resp & 0xf);
+
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, AUDIO_WIDGET_CAPS), &rp);
+        DEBUG("audio widget caps %08x type %x channels %d\n", rp.resp, rp.resp >> 20 & 0xf, 1 + (((rp.resp >> 12) & 0xe) | (rp.resp & 0x1)));
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, PCM_SIZES_AND_RATES), &rp);
+        DEBUG("pcm sizes and rates %08x\n", rp.resp);
+        DEBUG("  %s %s %s %s %s\n",
+              rp.resp & 0x100000 ? "32bit" : "",
+              rp.resp & 0x080000 ? "24bit" : "",
+              rp.resp & 0x040000 ? "20bit" : "",
+              rp.resp & 0x020000 ? "16bit" : "",
+              rp.resp & 0x010000 ? "8bit" : "");
+
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, STREAM_FORMATS), &rp);
+        DEBUG("stream formats %08x\n", rp.resp);
+
+        transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, PIN_CAPS), &rp);
+        DEBUG("pin caps %08x\n", rp.resp);
+    }
 }
 
 static void setup_codecs(struct hda_pci_dev *d)
@@ -1438,14 +1483,51 @@ struct audio_data {
     char *format;
 }__attribute__((packed));
 
+void set_run_bit(struct hda_pci_dev *dev, int state) {
+    assert(state == 0 || state == 1);
+    sdnctl_t sd_control;
+    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
+    DEBUG("SD control: %08x\n", sd_control.val);
+    DEBUG("SD control strmnum: %d\n", sd_control.strm_num);
+    sd_control.run = state;
+    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
+}
+
+
+#define SD_CTL_3B 0x82
+void set_stripe_control(struct hda_pci_dev *dev, int stripe_ctl) {
+    assert(stripe_ctl == 0 || stripe_ctl == 1 || stripe_ctl == 2);
+    uint8_t ctl_3b = hda_pci_read_regb(dev, SD_CTL_3B);
+    ctl_3b &= 0xFC; // Clear the bottom two bits
+    ctl_3b |= stripe_ctl; // Set the stripe control
+    hda_pci_write_regb(dev, SD_CTL_3B, ctl_3b);
+}
+
+#define SD_CTL_DMA_START	0x02    /* stream DMA start bit */
+#define SD_INT_DESC_ERR		0x10	/* descriptor error interrupt */
+#define SD_INT_FIFO_ERR		0x08	/* FIFO error interrupt */
+#define SD_INT_COMPLETE		0x04	/* completion interrupt */
+#define SD_INT_MASK		(SD_INT_DESC_ERR|SD_INT_FIFO_ERR|SD_INT_COMPLETE)
+void set_DMA_and_interrupt_mask(struct hda_pci_dev *dev) {
+    uint8_t sd_ctl = hda_pci_read_regb(dev, SDNCTL);
+    sd_ctl |= SD_CTL_DMA_START; // Set DMA start bit
+    sd_ctl &= ~(SD_INT_MASK);   // Clear the interrupt bits
+    hda_pci_write_regb(dev, SDNCTL, sd_ctl);
+}
+
+#define INTCTL 0x20
 void start_stream(struct hda_pci_dev *dev, struct audio_data data) {
     /* enable SIE */
+    hda_pci_write_regl(dev, INTCTL, 0);
 
     /* set stripe control */
+    set_stripe_control(dev, 0);
 
-    /* set DMA start (run) */ 
-    
-    /* set interrupt mask */
+    /* set DMA start and interrupt mask */
+    set_DMA_and_interrupt_mask(dev);
+
+    /* set run bit to 1 */
+    set_run_bit(dev, 1);
 }
 
 
@@ -1522,14 +1604,10 @@ typedef struct {
 
 void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     /* make sure the run bit is zero for SD */
-    sdnctl_t sd_control;
-    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
-    DEBUG("SD control: %08x\n", sd_control.val);
-    DEBUG("SD control strmnum: %d\n", sd_control.strm_num);
-    sd_control.run = 0;
-    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
+    set_run_bit(dev, 0);
 
     /* program the stream_tag */
+    sdnctl_t sd_control;
     sd_control.val = hda_pci_read_regl(dev, SDNCTL);
     sd_control.strm_num = 2;  // TODO: Change
     hda_pci_write_regl(dev, SDNCTL, sd_control.val);
@@ -1545,7 +1623,7 @@ void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     initialize_bdl(dev, data);
 
     /* enable the position buffer */
-    // TODO: Need to enable?
+    // TODO: Need to enable? No
 
     /* set the interrupt enable bits in the descriptor control register */
     sd_control.val = hda_pci_read_regl(dev, SDNCTL);
@@ -1555,6 +1633,25 @@ void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     hda_pci_write_regl(dev, SDNCTL, sd_control.val);
 }
 
+void enable_speaker(struct hda_pci_dev *dev, int codec, int pin_widget_node)
+{
+    DEBUG("Enabling speaker (node %d)\n", pin_widget_node);
+
+    codec_resp_t rp;
+    pinwgctl_t pin_wg_cntl;
+
+    transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(GET_PINWGTCTL, 0), &rp);
+    DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, rp.resp);
+
+    pin_wg_cntl.val = (uint8_t) rp.resp;
+    DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, pin_wg_cntl.val);
+    
+    pin_wg_cntl.out_enable = 1;
+
+    transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(GET_PINWGTCTL, pin_wg_cntl.val), &rp);
+    DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, rp.resp);
+
+}
 /* function to call externally to play audio */
 void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size, char *format) {
     /* package up a struct */
@@ -1568,4 +1665,7 @@ void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size, cha
 
     /* start stream */
     start_stream(dev, data);
+
+    /* enable speaker */
+    enable_speaker(dev, 0, 3); // TODO: Get pin widget number automatically
 }

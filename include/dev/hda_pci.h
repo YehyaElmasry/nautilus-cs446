@@ -47,4 +47,18 @@ int hda_pci_deinit();
 // Timing
 #define CODECS_DELAY 521 * 1000 // 521 us = 25 frames
 
+
+
+typedef union {
+    uint8_t val;
+    struct {
+        uint8_t vrefen:2;           // VRefEn[1:0]
+        uint8_t vrefen2:1;          // VrefEn[2]
+        uint8_t resv:2;             // Rsvd
+        uint8_t in_enable:1;        // In Enable
+        uint8_t out_enable:1;       // Out Enable
+        uint8_t h_phn_enable:1;     // H-Phn Enable
+    }__attribute__((packed));
+} __attribute__((packed)) pinwgctl_t;
+
 #endif
