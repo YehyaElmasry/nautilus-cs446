@@ -441,6 +441,8 @@ struct hda_pci_dev
 #define SET_PROCSTATE 0x703
 // ignoring S/PDIF stuff here
 // ignoring power state stuff here
+#define GET_POWSTATE  0xf05
+#define SET_POWSTATE  0x705
 #define GET_CONVCTL   0xf06
 #define SET_CONVCTL   0x706
 #define GET_SDISEL    0xf04
@@ -471,21 +473,21 @@ struct hda_pci_dev
 
 
 // parameters
-#define VENDOR      0x0 // also includes device id
-#define REVISION    0x2
-#define SUBORD_NODE_COUNT 0x4
-#define FUNC_GROUP_TYPE   0x5
-#define AUDIO_FUNC_GROUP_CAPS        0x8
-#define AUDIO_WIDGET_CAPS            0x9
-#define PCM_SIZES_AND_RATES          0xa // needed for playback/recording
-#define STREAM_FORMATS               0xb // ""
-#define PIN_CAPS                     0xc
-#define AMP_CAPS                     0xd
-#define CON_LIST_LEN                 0xe
-#define POWER_STATES                 0xf
-#define PROC_CAPS                    0x10
-#define GPIO_COUNT                   0x11
-#define VOL_KNOB_CAPS                0x13
+#define VENDOR                      0x0 // also includes device id
+#define REVISION                    0x2
+#define SUBORD_NODE_COUNT           0x4
+#define FUNC_GROUP_TYPE             0x5
+#define AUDIO_FUNC_GROUP_CAPS       0x8
+#define AUDIO_WIDGET_CAPS           0x9
+#define PCM_SIZES_AND_RATES         0xa // needed for playback/recording
+#define STREAM_FORMATS              0xb // ""
+#define PIN_CAPS                    0xc
+#define AMP_CAPS                    0xd
+#define CON_LIST_LEN                0xe
+#define POWER_STATES                0xf
+#define PROC_CAPS                   0x10
+#define GPIO_COUNT                  0x11
+#define VOL_KNOB_CAPS               0x13
 
 
 // accessor functions for device registers
@@ -1365,8 +1367,30 @@ static int bringup_device(struct hda_pci_dev *dev)
 
     setup_codecs(dev);
 
-    void *buf = malloc(512);
-    audio_from_buffer(dev, buf, 512, (char *) "hi");
+    /*
+    freqOfTone = 12000; %audacity is showing freq = 2100hz (approx)
+    samplingFreq = 44100;
+    duration = 1; %the file properties is showing duration of 5s
+    t=[0: 1/samplingFreq: duration];
+    y=sin(2*pi*freqOfTone*t)';
+    wavwrite(y,'temp.wav');
+    
+    int freqOfTone = 5000;
+    int samplingFreq = 44100;
+    int duration = 1;
+    
+    for(double t = 0; t < duration; t += (double) 1 / (double) samplingFreq)
+    {
+
+    }
+    */
+    char *buf = (char *) malloc(48000);
+    // Fill up buffer with sine wave
+    for (int i = 0; i < 48000; i++)
+    {
+        buf[i] = (i * 11) & 0xFF;
+    }
+    audio_from_buffer(dev, buf, 48000);
 
     // Make sure can read from device. For debugging
     //hda_test(dev);
@@ -1517,7 +1541,7 @@ void set_DMA_and_interrupt_mask(struct hda_pci_dev *dev) {
 
 #define INTCTL 0x20
 void start_stream(struct hda_pci_dev *dev, struct audio_data data) {
-    /* enable SIE */
+    /* disable SIE */
     hda_pci_write_regl(dev, INTCTL, 0);
 
     /* set stripe control */
@@ -1611,6 +1635,7 @@ void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     sd_control.val = hda_pci_read_regl(dev, SDNCTL);
     sd_control.strm_num = 2;  // TODO: Change
     hda_pci_write_regl(dev, SDNCTL, sd_control.val);
+    //DEBUG("Setup stream after strmnum: %08x\n", hda_pci_read_regl(dev, SDNCTL));
 
     /* program the length of samples in cyclic buffer */
     sdcbl_t sd_cbl = data.size;
@@ -1631,9 +1656,40 @@ void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     sd_control.feie = 0;
     sd_control.ioce = 0;
     hda_pci_write_regl(dev, SDNCTL, sd_control.val);
+    DEBUG("Setup stream: %08x\n", hda_pci_read_regl(dev, SDNCTL));
 }
 
-void enable_speaker(struct hda_pci_dev *dev, int codec, int pin_widget_node)
+void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_node)
+{
+    DEBUG("Setting up audio output widget (node %d)\n", output_widget_node);
+
+    codec_resp_t rp;
+
+    // Configure the DAC to use the stream number (step 5 is OSDEV)
+    outwgctl_t output_wg_ctl;
+    transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(GET_CONVCTL, 0), &rp);
+    output_wg_ctl.val = (uint8_t) rp.resp;
+    DEBUG("Node %d converter stream channel: %08x. Stream: %02x, Channel: %02x\n", \
+    output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
+
+    output_wg_ctl.stream = 2;
+    output_wg_ctl.channel = 0;
+    transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(SET_CONVCTL, output_wg_ctl.val), &rp);
+    
+    transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(GET_CONVCTL, 0), &rp);
+    DEBUG("Node %d converter stream channel: %08x. Stream: %02x, Channel: %02x\n", \
+    output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
+
+    // Make sure that the DAC is fully powered (step 6 in OSDEV)
+    transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(GET_POWSTATE, 0), &rp);
+    DEBUG("Node %d power state: %08x\n", output_widget_node, rp.resp);
+
+    // Make sure output is unmuted and volume is suitable (step 7 in OSDEV)
+    transact(dev, codec, output_widget_node, 0, MAKE_VERB_16(GET_GAINMUTE, 0xA000), &rp);
+    DEBUG("Node %d gain mute: %08x\n", output_widget_node, rp.resp);
+}
+
+void setup_pin_widget(struct hda_pci_dev *dev, int codec, int pin_widget_node)
 {
     DEBUG("Enabling speaker (node %d)\n", pin_widget_node);
 
@@ -1647,25 +1703,51 @@ void enable_speaker(struct hda_pci_dev *dev, int codec, int pin_widget_node)
     DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, pin_wg_cntl.val);
     
     pin_wg_cntl.out_enable = 1;
-
-    transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(GET_PINWGTCTL, pin_wg_cntl.val), &rp);
+    transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(SET_PINWGTCTL, pin_wg_cntl.val), &rp);
+    
+    transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(GET_PINWGTCTL, 0), &rp);
     DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, rp.resp);
+    pin_wg_cntl.val = (uint8_t) rp.resp;
 
+    DEBUG("Node %d pin widget control output enable: %d\n", pin_widget_node, pin_wg_cntl.out_enable);
 }
 /* function to call externally to play audio */
-void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size, char *format) {
+void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size) {
     /* package up a struct */
     struct audio_data data;
     data.buffer = buffer;
     data.size = size;
-    data.format = format;
+    //data.format = format;
     
     /* setup stream */
     setup_stream(dev, data);
 
+    /* enable audio output widget */
+    setup_output_widget(dev, 0, 2); // TODO: Get output widget automatically
+
+    /* enable speaker */
+    setup_pin_widget(dev, 0, 3); // TODO: Get pin widget number and codec automatically
+
     /* start stream */
     start_stream(dev, data);
 
-    /* enable speaker */
-    enable_speaker(dev, 0, 3); // TODO: Get pin widget number automatically
+    codec_resp_t rp;
+    transact(dev, 0, 0, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
+    DEBUG("Get node 0 connection list: %08x\n", rp.resp);
+    
+    transact(dev, 0, 1, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
+    DEBUG("Get node 1 connection list: %08x\n", rp.resp);
+
+    transact(dev, 0, 2, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
+    DEBUG("Get node 2 connection list: %08x\n", rp.resp);
+
+    transact(dev, 0, 3, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
+    DEBUG("Get node 3 connection list: %08x\n", rp.resp);
+/*
+    transact(dev, 0, 0, 0, MAKE_VERB_8(0x70A, 1), &rp);
+    transact(dev, 0, 1, 0, MAKE_VERB_8(0x70A, 1), &rp);
+    transact(dev, 0, 2, 0, MAKE_VERB_8(0x70A, 1), &rp);
+    transact(dev, 0, 3, 0, MAKE_VERB_8(0x70A, 1), &rp);
+    transact(dev, 0, 4, 0, MAKE_VERB_8(0x70A, 1), &rp);
+*/
 }

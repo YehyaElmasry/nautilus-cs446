@@ -61,4 +61,12 @@ typedef union {
     }__attribute__((packed));
 } __attribute__((packed)) pinwgctl_t;
 
+typedef union {
+    uint8_t val;
+    struct {
+        uint8_t channel:4;          // Stream
+        uint8_t stream:4;           // Channel
+    }__attribute__((packed));
+} __attribute__((packed)) outwgctl_t;
+
 #endif
