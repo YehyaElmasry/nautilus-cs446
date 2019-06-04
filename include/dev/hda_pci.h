@@ -24,7 +24,6 @@
 
 #include <nautilus/nautilus.h>
 
-
 int hda_pci_init(struct naut_info * naut);
 int hda_pci_deinit();
 
@@ -519,5 +518,5 @@ typedef struct
 
 #define OUTPUT_STREAM_NUM   4 // First output stream in QEMU. See https://github.com/qemu/qemu/blob/ad88e4252f09c2956b99c90de39e95bab2e8e7af/hw/audio/intel-hda.c#L891
 #define STREAM_NUM          5 // Arbitrarily chosen
-#define BUFF_SIZE  48000 * 5 // For testing. Change later
+#define BUFF_SIZE  1210848 // For testing. Change later
 #endif

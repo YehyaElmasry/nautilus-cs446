@@ -26,6 +26,7 @@
 
 #include <dev/hda_pci.h>
 #include <math.h>
+#include <test/piano.h>
 
 // On QEMU using -soundhw hda we see the following:
 //
@@ -919,12 +920,15 @@ static int bringup_device(struct hda_pci_dev *dev)
     setup_codecs(dev);
     
     char *buf = (char *) malloc(BUFF_SIZE);
+    memcpy(buf, piano, BUFF_SIZE);
     DEBUG("Audio buffer address: 0x%016x\n", buf);
     // Fill up buffer with random numbers
+    /*
     for (int i = 0; i < BUFF_SIZE; i++)
     {
         buf[i] = sin(4*i);
     }
+    */
     audio_from_buffer(dev, buf, BUFF_SIZE);
 
     return 0;
