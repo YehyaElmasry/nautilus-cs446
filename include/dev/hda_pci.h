@@ -436,17 +436,17 @@ struct audio_data
 // Buffer Descriptor List Entry
 typedef struct
 {
-    uint32_t reserved: 31;
-    uint32_t ioc: 1;
-    uint32_t length: 32;
     uint64_t address: 64;
+    uint32_t length: 32;
+    uint32_t ioc: 1;
+    uint32_t reserved: 31;
 } __attribute__((packed, aligned(128))) bdle_t;
 
 // Buffer Descriptor List
-struct hda_bdl
+typedef struct
 {
     bdle_t buf[MAX_BDL_ENTIRES];
-} __attribute__((aligned(128)));
+} __attribute__((aligned(128))) hda_bdl;
 
 #define DPLBASE 0x70
 typedef struct
@@ -519,5 +519,5 @@ typedef struct
 
 #define OUTPUT_STREAM_NUM   4 // First output stream in QEMU. See https://github.com/qemu/qemu/blob/ad88e4252f09c2956b99c90de39e95bab2e8e7af/hw/audio/intel-hda.c#L891
 #define STREAM_NUM          5 // Arbitrarily chosen
-
+#define BUFF_SIZE  48000 * 5 // For testing. Change later
 #endif
