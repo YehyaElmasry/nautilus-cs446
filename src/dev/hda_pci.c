@@ -181,7 +181,6 @@ static inline void hda_pci_write_regb(struct hda_pci_dev *dev, uint32_t offset, 
     }
 }
 
-
 //
 // This dance will eventually get abstracted into the PCI
 // subsystem so that we don't repeat it over and over...
@@ -918,31 +917,13 @@ static int bringup_device(struct hda_pci_dev *dev)
     setup_interrupts(dev);
 
     setup_codecs(dev);
-
-    /*
-    freqOfTone = 12000;
-    samplingFreq = 44100;
-    duration = 1; %the file properties is showing duration of 5s
-    t=[0: 1/samplingFreq: duration];
-    y=sin(2*pi*freqOfTone*t)';
-    wavwrite(y,'temp.wav');
-
-    int freqOfTone = 5000;
-    int samplingFreq = 44100;
-    int duration = 1;
-
-    for(double t = 0; t < duration; t += (double) 1 / (double) samplingFreq)
-    {
-
-    }
-    */
     
     char *buf = (char *) malloc(BUFF_SIZE);
     DEBUG("Audio buffer address: 0x%016x\n", buf);
     // Fill up buffer with random numbers
     for (int i = 0; i < BUFF_SIZE; i++)
     {
-        buf[i] = sin(2*i);
+        buf[i] = sin(4*i);
     }
     audio_from_buffer(dev, buf, BUFF_SIZE);
 
@@ -1058,23 +1039,17 @@ static void start_stream(struct hda_pci_dev *dev)
 
 static uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size)
 {
-    uint64_t len = 1280000;
-    /* if it's the first chunk and size is too small, split to have at least two entries */
-    if (current_offset == 0 && len >= total_size)
+    const uint64_t max_length = 0xFFFFFFFF; // Length is a 32-bit quantity
+    if (current_offset == 0)
     {
-        return len / 2;
+        return (total_size > max_length) ? max_length : total_size / 2; // Need at least two entries in the BDL
     }
-    /* if the remainder is less than len, the remainder will be an entry */
-    if (len >= total_size - current_offset)
+    else
     {
-        return total_size - current_offset;
+        uint64_t remaining_size = total_size - current_offset;
+        return (remaining_size > max_length) ? max_length : remaining_size;
     }
-    /* If our default len is too small, use a bigger one */
-    if (total_size > len * 256)
-    {
-        return total_size / 256;
-    }
-    return len;
+    
 }
 
 static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
@@ -1084,44 +1059,27 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
     /* split the data into BDL entries */
     hda_bdl *bdl;
     bdl = malloc(sizeof(hda_bdl));
-    DEBUG("BDL malloc: 0x%016x\n", bdl);
+    DEBUG("BDL malloc address: 0x%016x\n", bdl);
     uint16_t index = 0;
     uint64_t curr_offset = 0;
-    
-    // while (data.size >= curr_offset)
-    // {
-    //     uint64_t chunksize = get_chunk_size(curr_offset, data.size);
-    //     DEBUG("Initialize BDL: index: %d chuncksize: %d data.size: %d data.buffer: 0x%016x\n", index, chunksize, data.size, data.buffer);
-    //     curr_offset += chunksize;
-    //     bdl->buf[index].address = ((uint64_t)data.buffer) + curr_offset;
-    //     bdl->buf[index].length = chunksize;
-    //     /* we don't want interupts */
-    //     bdl->buf[index].ioc = 0;
-    //     index++;
-    // }
-    bdl->buf[0].reserved = 0;
-    bdl->buf[0].address = ((uint64_t)data.buffer);
-    bdl->buf[0].length = BUFF_SIZE / 2;
-    bdl->buf[index].ioc = 0;
-    
-    bdl->buf[1].reserved = 0;
-    bdl->buf[1].address = ((uint64_t)data.buffer) + BUFF_SIZE / 2;
-    bdl->buf[1].length = BUFF_SIZE / 2;
-    bdl->buf[index].ioc = 0;
-    
-    /*
-    for(int i = 0; i < BUFF_SIZE; i++)
+
+    while (curr_offset < data.size)
     {
-        DEBUG("data.buffer[%d] = %d\n", i, ((uint8_t*)data.buffer)[i]);
+        uint64_t chunksize = get_chunk_size(curr_offset, data.size);
+        DEBUG("Initialize BDL: index: %d chuncksize: %d data.size: %d data.buffer: 0x%016x\n", index, chunksize, data.size, data.buffer);
+        bdl->buf[0].reserved = 0; // Reserved must be 0. See page 56 of Intel HDA Manual
+        bdl->buf[index].address = ((uint64_t)data.buffer) + curr_offset;
+        bdl->buf[index].length = chunksize;
+        bdl->buf[index].ioc = 0; // We don't want interrupts
+        index++;
+        curr_offset += chunksize;
     }
-    */
 
     /* program the stream LVI (last valid index) of the BDL */
     uint16_t LVI = hda_pci_read_regw(dev, LAST_VALID_INDEX);
     DEBUG("LVI Read: 0x%04x\n", LVI);
     LVI &= 0xFF00; // Preserve bits [15:8]
-    //LVI |= index - 1;
-    LVI |= 1;
+    LVI |= index - 1;
     hda_pci_write_regw(dev, LAST_VALID_INDEX, LVI);
 
     LVI = hda_pci_read_regw(dev, LAST_VALID_INDEX);
@@ -1129,9 +1087,7 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
 
     /* program the BDL address */
     uint32_t bdl_u = (uint32_t)(((uint64_t)bdl) >> 32);
-    uint32_t bdl_l = ((uint32_t)(((uint64_t)bdl))) & 0xFFFFC0 ; // TODO: Make sure correct.
-    //uint32_t bdl_u = 0;
-    //uint32_t bdl_l = 0;
+    uint32_t bdl_l = ((uint32_t)(((uint64_t)bdl))) & 0xFFFFC0;
 
     hda_pci_write_regl(dev, BDL_LOWER, bdl_l);
     hda_pci_write_regl(dev, BDL_UPPER, bdl_u);
@@ -1139,7 +1095,6 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
     DEBUG("BDL Write: 0x%08x:%08x\n", bdl_u, bdl_l);
 
     DEBUG("BDL Read: 0x%08x:%08x\n", hda_pci_read_regl(dev, BDL_UPPER), hda_pci_read_regl(dev, BDL_LOWER));
-
 }
 
 static void setup_stream(struct hda_pci_dev *dev, struct audio_data data)
