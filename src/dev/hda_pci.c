@@ -1368,7 +1368,7 @@ static int bringup_device(struct hda_pci_dev *dev)
     setup_codecs(dev);
 
     /*
-    freqOfTone = 12000; %audacity is showing freq = 2100hz (approx)
+    freqOfTone = 12000;
     samplingFreq = 44100;
     duration = 1; %the file properties is showing duration of 5s
     t=[0: 1/samplingFreq: duration];
@@ -1385,7 +1385,7 @@ static int bringup_device(struct hda_pci_dev *dev)
     }
     */
     char *buf = (char *) malloc(48000);
-    // Fill up buffer with sine wave
+    // Fill up buffer with random numbers
     for (int i = 0; i < 48000; i++)
     {
         buf[i] = (i * 11) & 0xFF;
@@ -1477,12 +1477,15 @@ int hda_pci_deinit()
 }
 
 
-#define SDNCTL 0x80
+#define SDNCTL 0x80 + (OUTPUT_STREAM_NUM * 0x20)
 // Stream Descriptor n Control, 3 bytes
 typedef union {
-    uint32_t val;
     struct {
-        uint8_t padding:8;  // least significant byte is unimportant
+        uint8_t byte_1;
+        uint8_t byte_2;
+        uint8_t byte_3;
+    } __attribute__((packed));
+    struct {
         uint8_t srst:1;     // stream reset
         uint8_t run:1;      // stream run
         uint8_t ioce:1;     // interrupt on completion enable
@@ -1497,7 +1500,7 @@ typedef union {
 } __attribute__((packed)) sdnctl_t;
 
 // Cyclic buffer length
-#define SDNCBL 0x88
+#define SDNCBL 0x88  + (OUTPUT_STREAM_NUM * 0x20)
 typedef uint32_t sdcbl_t;
 
 // Audio data
@@ -1509,34 +1512,45 @@ struct audio_data {
 
 void set_run_bit(struct hda_pci_dev *dev, int state) {
     assert(state == 0 || state == 1);
+    /*
     sdnctl_t sd_control;
     sd_control.val = hda_pci_read_regl(dev, SDNCTL);
-    DEBUG("SD control: %08x\n", sd_control.val);
-    DEBUG("SD control strmnum: %d\n", sd_control.strm_num);
+    DEBUG("1 SD control: %08x\n", sd_control.val);
+    DEBUG("1 SD control stream number: %d\n", sd_control.strm_num);
     sd_control.run = state;
     hda_pci_write_regl(dev, SDNCTL, sd_control.val);
+    */
 }
 
-
-#define SD_CTL_3B 0x82
 void set_stripe_control(struct hda_pci_dev *dev, int stripe_ctl) {
     assert(stripe_ctl == 0 || stripe_ctl == 1 || stripe_ctl == 2);
-    uint8_t ctl_3b = hda_pci_read_regb(dev, SD_CTL_3B);
-    ctl_3b &= 0xFC; // Clear the bottom two bits
-    ctl_3b |= stripe_ctl; // Set the stripe control
-    hda_pci_write_regb(dev, SD_CTL_3B, ctl_3b);
+
+    sdnctl_t sd_control;
+    read_sd_control(dev, &sd_control);
+
+    sd_control.srst = 0;
+    sd_control.run = 0;
+    sd_control.stripe = stripe_ctl;
+
+    write_sd_control(dev, &sd_control);
 }
 
-#define SD_CTL_DMA_START	0x02    /* stream DMA start bit */
-#define SD_INT_DESC_ERR		0x10	/* descriptor error interrupt */
-#define SD_INT_FIFO_ERR		0x08	/* FIFO error interrupt */
-#define SD_INT_COMPLETE		0x04	/* completion interrupt */
-#define SD_INT_MASK		(SD_INT_DESC_ERR|SD_INT_FIFO_ERR|SD_INT_COMPLETE)
+
+//#define SD_CTL_DMA_START	0x02    /* stream DMA start bit */
+//#define SD_INT_DESC_ERR		0x10	/* descriptor error interrupt */
+//#define SD_INT_FIFO_ERR		0x08	/* FIFO error interrupt */
+//#define SD_INT_COMPLETE		0x04	/* completion interrupt */
+//#define SD_INT_MASK		(SD_INT_DESC_ERR|SD_INT_FIFO_ERR|SD_INT_COMPLETE)
+
 void set_DMA_and_interrupt_mask(struct hda_pci_dev *dev) {
-    uint8_t sd_ctl = hda_pci_read_regb(dev, SDNCTL);
-    sd_ctl |= SD_CTL_DMA_START; // Set DMA start bit
-    sd_ctl &= ~(SD_INT_MASK);   // Clear the interrupt bits
-    hda_pci_write_regb(dev, SDNCTL, sd_ctl);
+    sdnctl_t sd_control;
+    read_sd_control(dev, &sd_control);
+
+    sd_control.ioce = 1;
+    sd_control.feie= 1;
+    sd_control.deie = 1;
+
+    write_sd_control(dev, &sd_control);
 }
 
 #define INTCTL 0x20
@@ -1551,8 +1565,10 @@ void start_stream(struct hda_pci_dev *dev, struct audio_data data) {
     set_DMA_and_interrupt_mask(dev);
 
     /* set run bit to 1 */
-    set_run_bit(dev, 1);
-}
+    sdnctl_t sd_control;
+    read_sd_control(dev, &sd_control);
+    sd_control.run = 1;
+    write_sd_control(dev, &sd_control);}
 
 
 uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size) {
@@ -1573,9 +1589,9 @@ uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size) {
 }
 
 #define MAX_BDL_ENTIRES 256
-#define LAST_VALID_INDEX 0x8C
-#define BDL_LOWER 0x98
-#define BDL_UPPER 0x9C
+#define LAST_VALID_INDEX 0x8C + (OUTPUT_STREAM_NUM * 0x20)
+#define BDL_LOWER 0x98 + (OUTPUT_STREAM_NUM * 0x20)
+#define BDL_UPPER 0x9C + (OUTPUT_STREAM_NUM * 0x20)
 
 // Buffer Descriptor List Entry
 typedef struct {
@@ -1626,20 +1642,39 @@ typedef struct {
     
 } __attribute__((packed, aligned(128))) dplbase_t;
 
+void write_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control) {
+    DEBUG("Write SD Control: byte1: %02x byte2: %02x byte3: %02x\n",
+            sd_control->byte_1, sd_control->byte_2, sd_control->byte_3);
+
+    hda_pci_write_regb(dev, SDNCTL, sd_control->byte_1);
+    hda_pci_write_regb(dev, SDNCTL + 1, sd_control->byte_2);
+    hda_pci_write_regb(dev, SDNCTL + 2, sd_control->byte_3);
+}
+
+void read_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control){
+    sd_control->byte_1  = hda_pci_read_regb(dev, SDNCTL);
+    sd_control->byte_2 = hda_pci_read_regb(dev, SDNCTL + 1);
+    sd_control->byte_3 = hda_pci_read_regb(dev, SDNCTL + 2);
+    DEBUG("Read SD Control: byte1: %02x byte2: %02x byte3: %02x\n",
+            sd_control->byte_1, sd_control->byte_2, sd_control->byte_3);
+}
+
 void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     /* make sure the run bit is zero for SD */
-    set_run_bit(dev, 0);
+    sdnctl_t sd_control;
+    read_sd_control(dev, &sd_control);
+    sd_control.run = 0;
+    write_sd_control(dev, &sd_control);
 
     /* program the stream_tag */
-    sdnctl_t sd_control;
-    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
-    sd_control.strm_num = 2;  // TODO: Change
-    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
-    //DEBUG("Setup stream after strmnum: %08x\n", hda_pci_read_regl(dev, SDNCTL));
+    read_sd_control(dev, &sd_control);
+    sd_control.strm_num = STREAM_NUM;
+    write_sd_control(dev, &sd_control);
+    read_sd_control(dev, &sd_control);
 
     /* program the length of samples in cyclic buffer */
     sdcbl_t sd_cbl = data.size;
-    hda_pci_write_regl(dev, SDNCTL, sd_cbl);
+    hda_pci_write_regl(dev, SDNCBL, sd_cbl);
 
     /* program the stream format */
     // Not doing anything now. Stick with defaults
@@ -1651,12 +1686,11 @@ void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     // TODO: Need to enable? No
 
     /* set the interrupt enable bits in the descriptor control register */
-    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
+    read_sd_control(dev, &sd_control);
     sd_control.deie = 0;
     sd_control.feie = 0;
     sd_control.ioce = 0;
-    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
-    DEBUG("Setup stream: %08x\n", hda_pci_read_regl(dev, SDNCTL));
+    write_sd_control(dev, &sd_control);
 }
 
 void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_node)
@@ -1672,7 +1706,7 @@ void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_n
     DEBUG("Node %d converter stream channel: %08x. Stream: %02x, Channel: %02x\n", \
     output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
 
-    output_wg_ctl.stream = 2;
+    output_wg_ctl.stream = STREAM_NUM;
     output_wg_ctl.channel = 0;
     transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(SET_CONVCTL, output_wg_ctl.val), &rp);
     
@@ -1723,7 +1757,7 @@ void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size) {
     setup_stream(dev, data);
 
     /* enable audio output widget */
-    setup_output_widget(dev, 0, 2); // TODO: Get output widget automatically
+    setup_output_widget(dev, 0, 2); // TODO: Get output widget and codec automatically
 
     /* enable speaker */
     setup_pin_widget(dev, 0, 3); // TODO: Get pin widget number and codec automatically

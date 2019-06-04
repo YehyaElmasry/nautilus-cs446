@@ -45,9 +45,10 @@ int hda_pci_deinit();
 #define CRST_MASK           0x1
 #define STATESTS_INT_MASK   0xFF
 // Timing
-#define CODECS_DELAY 521 * 1000 // 521 us = 25 frames
+#define CODECS_DELAY        521 * 1000 // 521 us = 25 frames
 
-
+#define OUTPUT_STREAM_NUM   4 // First output stream in QEMU. See https://github.com/qemu/qemu/blob/ad88e4252f09c2956b99c90de39e95bab2e8e7af/hw/audio/intel-hda.c#L891
+#define STREAM_NUM          5 // Arbitrarily chosen
 
 typedef union {
     uint8_t val;
