@@ -26,37 +26,6 @@
 
 #include <dev/hda_pci.h>
 
-#ifndef NAUT_CONFIG_DEBUG_HDA_PCI
-#undef DEBUG_PRINT
-#define DEBUG_PRINT(fmt, args...)
-#endif
-
-#define INFO(fmt, args...) INFO_PRINT("hda_pci: " fmt, ##args)
-#define DEBUG(fmt, args...) DEBUG_PRINT("hda_pci: " fmt, ##args)
-#define ERROR(fmt, args...) ERROR_PRINT("hda_pci: " fmt, ##args)
-
-// show output for all reg read/writes
-#define DO_DEBUG_REGS 0
-#if DO_DEBUG_REGS
-#define DEBUG_REGS(fmt, args...) DEBUG(fmt, ##args)
-#else
-#define DEBUG_REGS(fmt, args...)
-#endif
-
-#define GLOBAL_LOCK_CONF uint8_t _global_lock_flags
-#define GLOBAL_LOCK() _global_lock_flags = spin_lock_irq_save(&global_lock)
-#define GLOBAL_UNLOCK() spin_unlock_irq_restore(&global_lock, _global_lock_flags)
-
-#define STATE_LOCK_CONF uint8_t _state_lock_flags
-#define STATE_LOCK(state) _state_lock_flags = spin_lock_irq_save(&(state->lock))
-#define STATE_UNLOCK(state) spin_unlock_irq_restore(&(state->lock), _state_lock_flags)
-
-#define assert(cond) \
-    if (cond) {} \
-    else { \
-    ERROR("Assert failed in %s: %d\n", __FILE__, __LINE__);\
-    }\
-//
 // On QEMU using -soundhw hda we see the following:
 //
 //0:4.0 : 8086:2668 0103c 0010s MSI(off,MSI64,nn=1,bv=0,nv=0,tc=0) legacy(l=11,p=1)
@@ -69,314 +38,6 @@ static int num_devs = 0;
 
 // list of hda devices
 static struct list_head dev_list;
-
-#define GCAP     0x0
-#define GCAP_LEN 0x2
-typedef union gcap   // all read only
-{
-    uint16_t val;
-    struct
-    {
-        uint8_t ok64: 1;
-        uint8_t nsdo: 2;
-        uint8_t bss: 5;
-        uint8_t iss: 4;
-        uint8_t oss: 4;
-#define NUM_SDO(x) (((x).nsdo)==0 ? 1 : ((x).nsdo)==1 ? 2 : ((x).nsdo)==2 ? 4 : 0)
-    };
-} __attribute__((packed)) gcap_t;
-
-#define VMIN     0x2
-#define VMIN_LEN 0x1
-typedef uint8_t vmin_t;  // readonly
-
-#define VMAJ     0x3
-#define VMAJ_LEN 0x1
-typedef uint8_t vmaj_t;  // read only
-
-#define OUTPAY     0x4
-#define OUTPAY_LEN 0x2
-typedef uint16_t outpay_t;  // read only, maximum payload size
-
-#define INPAY     0x6
-#define INPAY_LEN 0x2
-typedef uint16_t inpay_t;  // read only, maximum payload size
-
-#define GCTL      0x8
-#define GCTL_LEN  0x4
-typedef union
-{
-    uint32_t val;
-    struct
-    {
-        uint8_t crst: 1; // read write sticky => write 0 to assert reset, 1 to deassert rest, read of 1=> ready
-        // must have CORB/RIRB RUN, and stream RUN bits off before vbefore reset
-        uint8_t fcntrl: 1; // read write write 1 to initiate flush, cycle ends with Flush Status
-        uint8_t res2: 6; // reserved, preserve
-        uint8_t unsol: 1; // read write 1=> unsolicited responses from codecs are forwarded to RIRB
-        uint32_t res1: 23; // reserved, preserve
-    };
-} __attribute__((packed)) gctl_t;
-
-#define WAKEEN     0xc
-#define WAKEEN_LEN 0x2
-typedef uint16_t wakeen_t;
-
-#define STATESTS     0xe
-#define STATESTS_LEN 0x2
-typedef union
-{
-    uint16_t val;
-    struct
-    {
-        uint16_t  sdiwake: 15; // read only, write 1 to clear, sticky, flag
-#define SDIMAX 15
-#define SDIWAKE(s,i) ((((s).sdiwake)>>(i)) & 0x1)
-#define SDIWAKE_RESET_MASK 0x7fff
-        uint8_t   res: 1;   // reserved zero
-    };
-} __attribute__((packed)) statests_t;
-
-
-// GSTS
-// OUTSTRMPAY
-// INSTRMPAY
-
-#define INTCTL       0x20
-#define INTCTL_LEN   0x4
-typedef union
-{
-    uint32_t val;
-    struct
-    {
-        uint32_t  sie: 30;     // stream interrupt enable bits (interrupts from streams)
-        // low->high, input streams, then output streams, finally bidirs
-        uint8_t   cie: 1;      // controller interrupt enable (interrupts from controller)
-        uint8_t   gie: 1;      // global interrupt enable (interrupts at all)
-    };
-} __attribute__((packed)) intctl_t;
-
-#define INTSTS       0x24
-#define INTSTS_LEN   0x4
-typedef union
-{
-    uint32_t val;
-    struct
-    {
-        uint32_t  sis: 30;     // high if stream raised interrupt, same format as sie, above
-        uint8_t   cis: 1;      // controller interrupt status
-        uint8_t   gis: 1;      // global interrupt status
-    };
-} __attribute__((packed)) intsts_t;
-
-
-#define CORBLBASE      0x40
-#define CORBLBASE_LEN  0x4
-typedef uint32_t corblbase_t;   // 128 byte alignment!
-
-#define CORBUBASE      0x44
-#define CORBUBASE_LEN  0x4
-typedef uint32_t corbubase_t;
-
-#define CORBWP         0x48
-#define CORBWP_LEN     0x2
-typedef union
-{
-    uint16_t val;
-    struct
-    {
-        uint8_t corbwp;  // in units of corb commands (4 bytes each)
-        uint8_t res;    // reserved/preserve
-    };
-} __attribute__((packed)) corbwp_t;
-
-#define CORBRP         0x4a
-#define CORBRP_LEN     0x2
-typedef union
-{
-    uint16_t val;
-    struct
-    {
-        uint8_t corbrp;   // in units of corb commands
-        uint8_t res: 7;   // reserved/preserve
-        uint8_t corbrprst: 1; // rw 1=> flush+reset, then wait to transition to 1, then write 0, then wait for transition to 1
-    };
-} __attribute__((packed)) corbrp_t;
-
-#define CORBCTL         0x4c
-#define CORBCTL_LEN     0x1
-typedef union
-{
-    uint8_t val;
-    struct
-    {
-        uint8_t cmeie: 1;   // generate interrupt if memory error
-        uint8_t corbrun: 1; // write 1 => start CORB DMA, read value back to confirm started
-    };
-} __attribute__((packed)) corbctl_t;
-
-#define CORBSTS         0x4d
-#define CORBSTS_LEN     0x1
-typedef union
-{
-    uint8_t val;
-    struct
-    {
-        uint8_t cmei: 1;   // memory error detected (DMA is borked), write 1 to clear
-        uint8_t res: 7;   // preserve
-    };
-} __attribute__((packed)) corbsts_t;
-
-#define CORBSIZE         0x4e
-#define CORBSIZE_LEN     0x1
-typedef union
-{
-    uint8_t val;
-    struct
-    {
-        uint8_t corbsize: 2;
-#define CORBSIZE_DECODE(x) ((x->corbsize==0 ? 2 : x->corbsize==1 ? 16 : x->corbsize==2 : 256 : 0))
-        uint8_t res: 2;   // preserve
-        uint8_t corbszcap: 4; // read onlye
-#define CORBSIZECAP_HAS_2(x) (!!(x.corbszcap & 0x1))
-#define CORBSIZECAP_HAS_16(x) (!!(x.corbszcap & 0x2))
-#define CORBSIZECAP_HAS_256(x) (!!(x.corbszcap & 0x4))
-    };
-} __attribute__((packed)) corbsize_t;
-
-
-#define RIRBLBASE      0x50
-#define RIRBLBASE_LEN  0x4
-typedef uint32_t rirblbase_t;   // 128 byte alignment!
-
-#define RIRBUBASE      0x54
-#define RIRBUBASE_LEN  0x4
-typedef uint32_t rirbubase_t;
-
-#define RIRBWP         0x58
-#define RIRBWP_LEN     0x2
-typedef union
-{
-    uint16_t val;
-    struct
-    {
-        uint8_t rirbwp;      // in units of rirb responses (8 bytes long)
-        uint8_t res: 7;      // reserved/preserve
-        uint8_t rirbwprst: 1; // write 1 to reset, must stop DMA engine first
-    };
-} __attribute__((packed)) rirbwp_t;
-
-#define RINTCNT         0x5a
-#define RINTCNT_LEN     0x2
-typedef union
-{
-    uint16_t val;
-    struct
-    {
-        uint8_t rintcnt;  // 1=1, 2=2, but 0=256
-        uint8_t res;    // reserved/preserve
-    };
-} __attribute__((packed)) rintcnt_t;
-
-#define RIRBCTL         0x5c
-#define RIRBCTL_LEN     0x1
-typedef union
-{
-    uint8_t val;
-    struct
-    {
-        uint8_t rintctl: 1;   // write 1 to generate interrupt after n responses or empry response slot on input
-        uint8_t rirbdmaen: 1; // write 1 to make DMA engine spin
-        uint8_t rirboic: 1;   // write 1 => generate interrupt on response overrun interrupt status bit
-    };
-} __attribute__((packed)) rirbctl_t;
-
-#define RIRBSTS         0x5d
-#define RIRBSTS_LEN     0x1
-typedef union
-{
-    uint8_t val;
-    struct
-    {
-        uint8_t rintfl: 1;  // reads as 1 when interrupt generated after n responses or empty slot, clear by writing 1
-        uint8_t res1: 1;    // must be zero
-        uint8_t rirbois: 1; // reads as 1 when rirb is overrun, clear by writing 1
-        uint8_t res2: 5;    // must be zero
-    };
-} __attribute__((packed)) rirbsts_t;
-
-#define RIRBSIZE         0x5e
-#define RIRBSIZE_LEN     0x1
-typedef union
-{
-    uint8_t val;
-    struct
-    {
-        uint8_t rirbsize: 2;
-#define RIRBSIZE_DECODE(x) ((x->rirbsize==0 ? 2 : x->rirsize==1 ? 16 : x->rirbsize==2 : 256 : 0))
-        uint8_t res: 2;   // preserve
-        uint8_t rirbszcap: 4; // read onlye
-#define RIRBSIZECAP_HAS_2(x) (!!(x.rirbszcap & 0x1))
-#define RIRBSIZECAP_HAS_16(x) (!!(x.rirbszcap & 0x2))
-#define RIRBSIZECAP_HAS_256(x) (!!(x.rirbszcap & 0x4))
-    };
-} __attribute__((packed)) rirbsize_t;
-
-
-
-
-
-typedef struct
-{
-    int valid;
-    // codec state goes here
-} codec_state_t;
-
-#define MAX_CORB_ENTRIES 256
-typedef union
-{
-    uint32_t val;
-    struct
-    {
-        uint32_t verb: 20;  // actual command
-        uint8_t nid: 7;     // node id, node 0=>root
-        uint8_t indirect: 1; // indirect node ref
-        uint8_t CAd: 4;     // codec id (dest)
-    } __attribute__((packed)) ;
-} __attribute__((packed)) corb_entry_t;
-typedef corb_entry_t codec_req_t;
-
-typedef struct
-{
-    corb_entry_t buf[MAX_CORB_ENTRIES];
-    int size; // actual number of entries used
-    int cur_write; // our write pointer for comparison with its read pointer
-} __attribute__((aligned(128))) corb_state_t;
-
-#define MAX_RIRB_ENTRIES 256
-typedef struct
-{
-    uint32_t resp;
-    union
-    {
-        uint32_t val;
-        struct
-        {
-            uint8_t  codec: 4;
-            uint8_t  unsol: 1; // unsolicited response
-            uint32_t res: 27;
-        } __attribute__((packed)) ;
-    } __attribute__((packed)) resp_ex ;
-} __attribute__((packed)) rirb_entry_t;
-typedef rirb_entry_t codec_resp_t;
-
-typedef struct
-{
-    rirb_entry_t buf[MAX_RIRB_ENTRIES];
-    int size; // actual number of entries used
-    int cur_read; // current read pointer (where driver is)
-} __attribute__((aligned(128))) rirb_state_t;
-
 
 struct hda_pci_dev
 {
@@ -426,69 +87,6 @@ struct hda_pci_dev
     rirb_state_t rirb;  // response input ring buffer
 
 };
-
-// Codec requests
-
-#define MAKE_VERB_8(id,payload)  ((((uint32_t)(id))<<8 ) | (((uint32_t)(payload))&0xff))
-#define MAKE_VERB_16(id,payload) ((((uint32_t)(id))<<16) | (((uint32_t)(payload))&0xffff))
-
-// 12 bit identifiers (8 bits payload)
-#define GET_PARAM   0xf00
-#define GET_CONSEL  0xf01
-#define SET_CONSEL  0x701
-#define GET_CONLIST 0xf02
-#define GET_PROCSTATE 0xf03
-#define SET_PROCSTATE 0x703
-// ignoring S/PDIF stuff here
-// ignoring power state stuff here
-#define GET_POWSTATE  0xf05
-#define SET_POWSTATE  0x705
-#define GET_CONVCTL   0xf06
-#define SET_CONVCTL   0x706
-#define GET_SDISEL    0xf04
-#define SET_SDISEL    0x704
-#define GET_PINWGTCTL 0xf07
-#define SET_PINWGTCTL 0x707
-#define GET_CONSELCTL 0xf08
-#define SET_CONSELCTL 0x708
-#define GET_PINSENSE  0xf09
-#define EXE_PINSENSE  0x709
-#define GET_EAPDBTLEN 0xf0c
-#define SET_EAPDBTLEN 0xf0c
-//
-// skipping... a lot of GPIO stuff, Beep Generation, Volume Knob
-//
-#define GET_IMPLID  0xf20
-// skipping... more
-
-// 4 bit identifiers (16 bits payload)
-#define GET_COEFFIDX  0xd
-#define SET_COEFFIDX  0x5
-#define GET_COEFF     0xc
-#define SET_COEFF     0x4
-#define GET_GAINMUTE  0xb
-#define SET_GAINMUTE  0x3
-#define GET_CONVFMT   0xa
-#define SET_CONVFMT   0x2
-
-
-// parameters
-#define VENDOR                      0x0 // also includes device id
-#define REVISION                    0x2
-#define SUBORD_NODE_COUNT           0x4
-#define FUNC_GROUP_TYPE             0x5
-#define AUDIO_FUNC_GROUP_CAPS       0x8
-#define AUDIO_WIDGET_CAPS           0x9
-#define PCM_SIZES_AND_RATES         0xa // needed for playback/recording
-#define STREAM_FORMATS              0xb // ""
-#define PIN_CAPS                    0xc
-#define AMP_CAPS                    0xd
-#define CON_LIST_LEN                0xe
-#define POWER_STATES                0xf
-#define PROC_CAPS                   0x10
-#define GPIO_COUNT                  0x11
-#define VOL_KNOB_CAPS               0x13
-
 
 // accessor functions for device registers
 
@@ -582,6 +180,7 @@ static inline void hda_pci_write_regb(struct hda_pci_dev *dev, uint32_t offset, 
     }
 }
 
+void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size);
 
 //
 // This dance will eventually get abstracted into the PCI
@@ -738,47 +337,6 @@ static int discover_devices(struct pci_info *pci)
         }
     }
     return 0;
-}
-
-static void hda_reset(struct hda_pci_dev *dev)
-{
-    uint32_t glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL);
-    DEBUG("GLOB CTRL: %x\n", glob_ctrl_val);
-
-    hda_pci_write_regl(dev, GLOB_CTRL, glob_ctrl_val | CRST_MASK);
-    DEBUG("Wrote 1 to CRST bit of GLOB CTRL\n");
-
-    DEBUG("Waiting for device to come out of reset...\n");
-
-    // Wait until the CRST bit is flipped to one (device is done resetting)
-    while(((glob_ctrl_val = hda_pci_read_regl(dev, GLOB_CTRL)) & CRST_MASK) == 0)
-    {
-        DEBUG("GLOB CTRL is %x!\n", glob_ctrl_val);
-    }
-    DEBUG("Device is out of reset\n");
-}
-static void hda_test(struct hda_pci_dev *dev)
-{
-    uint8_t major, minor;
-    uint16_t cap;
-    minor = hda_pci_read_regb(dev, MINOR);
-    major = hda_pci_read_regb(dev, MAJOR);
-    cap = hda_pci_read_regw(dev, GLOB_CAP);
-    DEBUG("Major: %x, Minor: %x, Glob Cap: %x\n", major, minor, cap);
-}
-
-static void hda_discover_codecs(struct hda_pci_dev *dev)
-{
-    // Discover codecs
-    uint16_t statests = 0;
-
-    statests = hda_pci_read_regw(dev, STATESTS);
-    DEBUG("Statests Value before delay: %x\n", statests);
-
-    udelay(CODECS_DELAY * 100); // Wait for codecs to be initialized
-
-    statests = hda_pci_read_regw(dev, STATESTS);
-    DEBUG("Statests Value after delay: %x\n", statests);
 }
 
 static void get_caps(struct hda_pci_dev *d)
@@ -1026,7 +584,6 @@ static void corb_show(struct hda_pci_dev *d, int count)
     }
 }
 
-
 static void corb_queue_request(struct hda_pci_dev *d, codec_req_t *r)
 {
     corbwp_t wp;
@@ -1110,7 +667,6 @@ static void rirb_dequeue_response(struct hda_pci_dev *d, codec_resp_t *r)
 
 }
 
-
 static void setup_interrupts(struct hda_pci_dev *d)
 {
     intctl_t c;
@@ -1124,7 +680,6 @@ static void setup_interrupts(struct hda_pci_dev *d)
     DEBUG("interrupts enabled:  global and controller\n");
 }
 
-
 static void transact(struct hda_pci_dev *d, int codec, int nid, int indirect, uint32_t verb, codec_resp_t *rp)
 {
     codec_req_t rq;
@@ -1137,7 +692,6 @@ static void transact(struct hda_pci_dev *d, int codec, int nid, int indirect, ui
     corb_queue_request(d, &rq);
     rirb_dequeue_response(d, rp);
 }
-
 
 static void setup_codec(struct hda_pci_dev *d, int codec)
 {
@@ -1195,7 +749,7 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
 
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, STREAM_FORMATS), &rp);
         DEBUG("stream formats %08x\n", rp.resp);
-        
+
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, PIN_CAPS), &rp);
         DEBUG("pin caps %08x\n", rp.resp);
     }
@@ -1215,7 +769,7 @@ static void setup_codec(struct hda_pci_dev *d, int codec)
 
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, SUBORD_NODE_COUNT), &rp);
         DEBUG("starting node %d total nodes %d\n", rp.resp >> 16 & 0xff, rp.resp & 0xff);
-        
+
         transact(d, codec, node, 0, MAKE_VERB_8(GET_PARAM, FUNC_GROUP_TYPE), &rp);
         DEBUG("func group type %x unsol %d\n", rp.resp & 0xff, rp.resp >> 8 & 0x1);
 
@@ -1266,13 +820,12 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
     //DEBUG("Interrupt status %08x\n", is.val);
 
     // handle
-    
+
 
     IRQ_HANDLER_END();
 
     return 0;
 }
-
 
 // 4.2.1 - PCI config
 //     To Do: make sure all enabled, interrupt enabled, dma enabled
@@ -1374,39 +927,23 @@ static int bringup_device(struct hda_pci_dev *dev)
     t=[0: 1/samplingFreq: duration];
     y=sin(2*pi*freqOfTone*t)';
     wavwrite(y,'temp.wav');
-    
+
     int freqOfTone = 5000;
     int samplingFreq = 44100;
     int duration = 1;
-    
+
     for(double t = 0; t < duration; t += (double) 1 / (double) samplingFreq)
     {
 
     }
     */
-    char *buf = (char *) malloc(48000);
+    char *buf = (char *) malloc(48000 * 3);
     // Fill up buffer with random numbers
-    for (int i = 0; i < 48000; i++)
+    for (int i = 0; i < 48000 * 3; i++)
     {
         buf[i] = (i * 11) & 0xFF;
     }
-    audio_from_buffer(dev, buf, 48000);
-
-    // Make sure can read from device. For debugging
-    //hda_test(dev);
-
-    //hda_reset(dev);
-
-
-
-    // Clear STATESTS register
-    //hda_pci_write_regw(dev, STATESTS, STATESTS_INT_MASK);
-
-    // Reset device
-    //hda_reset(dev);
-
-    // Discover Codecs
-    //hda_discover_codecs(dev);
+    audio_from_buffer(dev, buf, 48000 * 3);
 
     return 0;
 }
@@ -1420,7 +957,6 @@ struct nk_snd_dev_int
 };
 
 static struct nk_snd_dev_int ops;
-
 
 static int bringup_devices()
 {
@@ -1468,7 +1004,6 @@ int hda_pci_init(struct naut_info * naut)
     return bringup_devices();
 }
 
-
 int hda_pci_deinit()
 {
     // should really scan list of devices and tear down...
@@ -1476,145 +1011,82 @@ int hda_pci_deinit()
     return 0;
 }
 
+static void write_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control)
+{
+    DEBUG("Write SD Control: byte1: %02x byte2: %02x byte3: %02x\n",
+          sd_control->byte_1, sd_control->byte_2, sd_control->byte_3);
 
-#define SDNCTL 0x80 + (OUTPUT_STREAM_NUM * 0x20)
-// Stream Descriptor n Control, 3 bytes
-typedef union {
-    struct {
-        uint8_t byte_1;
-        uint8_t byte_2;
-        uint8_t byte_3;
-    } __attribute__((packed));
-    struct {
-        uint8_t srst:1;     // stream reset
-        uint8_t run:1;      // stream run
-        uint8_t ioce:1;     // interrupt on completion enable
-        uint8_t feie:1;     // FIFO error interrupt enable
-        uint8_t deie:1;     // descriptor error interrupt enable
-        uint16_t resv:11;   // 15:5 reserved
-        uint8_t stripe:2;   // stripe control
-        uint8_t tp:1;       // traffic priority
-        uint8_t dir:1;      // bidirectional direction control
-        uint8_t strm_num:4; // stream number
-    }__attribute__((packed));
-} __attribute__((packed)) sdnctl_t;
-
-// Cyclic buffer length
-#define SDNCBL 0x88  + (OUTPUT_STREAM_NUM * 0x20)
-typedef uint32_t sdcbl_t;
-
-// Audio data
-struct audio_data {
-    void *buffer;
-    uint64_t size;
-    char *format;
-}__attribute__((packed));
-
-void set_run_bit(struct hda_pci_dev *dev, int state) {
-    assert(state == 0 || state == 1);
-    /*
-    sdnctl_t sd_control;
-    sd_control.val = hda_pci_read_regl(dev, SDNCTL);
-    DEBUG("1 SD control: %08x\n", sd_control.val);
-    DEBUG("1 SD control stream number: %d\n", sd_control.strm_num);
-    sd_control.run = state;
-    hda_pci_write_regl(dev, SDNCTL, sd_control.val);
-    */
+    hda_pci_write_regb(dev, SDNCTL, sd_control->byte_1);
+    hda_pci_write_regb(dev, SDNCTL + 1, sd_control->byte_2);
+    hda_pci_write_regb(dev, SDNCTL + 2, sd_control->byte_3);
 }
 
-void set_stripe_control(struct hda_pci_dev *dev, int stripe_ctl) {
-    assert(stripe_ctl == 0 || stripe_ctl == 1 || stripe_ctl == 2);
-
-    sdnctl_t sd_control;
-    read_sd_control(dev, &sd_control);
-
-    sd_control.srst = 0;
-    sd_control.run = 0;
-    sd_control.stripe = stripe_ctl;
-
-    write_sd_control(dev, &sd_control);
+static void read_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control)
+{
+    sd_control->byte_1  = hda_pci_read_regb(dev, SDNCTL);
+    sd_control->byte_2 = hda_pci_read_regb(dev, SDNCTL + 1);
+    sd_control->byte_3 = hda_pci_read_regb(dev, SDNCTL + 2);
+    DEBUG("Read SD Control: byte1: %02x byte2: %02x byte3: %02x\n",
+          sd_control->byte_1, sd_control->byte_2, sd_control->byte_3);
 }
 
-
-//#define SD_CTL_DMA_START	0x02    /* stream DMA start bit */
-//#define SD_INT_DESC_ERR		0x10	/* descriptor error interrupt */
-//#define SD_INT_FIFO_ERR		0x08	/* FIFO error interrupt */
-//#define SD_INT_COMPLETE		0x04	/* completion interrupt */
-//#define SD_INT_MASK		(SD_INT_DESC_ERR|SD_INT_FIFO_ERR|SD_INT_COMPLETE)
-
-void set_DMA_and_interrupt_mask(struct hda_pci_dev *dev) {
+static void start_stream(struct hda_pci_dev *dev)
+{
     sdnctl_t sd_control;
-    read_sd_control(dev, &sd_control);
 
-    sd_control.ioce = 1;
-    sd_control.feie= 1;
-    sd_control.deie = 1;
-
-    write_sd_control(dev, &sd_control);
-}
-
-#define INTCTL 0x20
-void start_stream(struct hda_pci_dev *dev, struct audio_data data) {
     /* disable SIE */
     hda_pci_write_regl(dev, INTCTL, 0);
 
     /* set stripe control */
-    set_stripe_control(dev, 0);
+    read_sd_control(dev, &sd_control);
+    sd_control.stripe = 0;
+    write_sd_control(dev, &sd_control);
 
     /* set DMA start and interrupt mask */
-    set_DMA_and_interrupt_mask(dev);
+    read_sd_control(dev, &sd_control);
+    sd_control.ioce = 1;
+    sd_control.feie = 1;
+    sd_control.deie = 1;
+    write_sd_control(dev, &sd_control);
 
     /* set run bit to 1 */
-    sdnctl_t sd_control;
     read_sd_control(dev, &sd_control);
     sd_control.run = 1;
-    write_sd_control(dev, &sd_control);}
+    write_sd_control(dev, &sd_control);
+}
 
-
-uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size) {
+static uint64_t get_chunk_size(uint64_t current_offset, uint64_t total_size)
+{
     uint64_t len = 1280000;
     /* if it's the first chunk and size is too small, split to have at least two entries */
-    if (current_offset == 0 && len >= total_size) {
+    if (current_offset == 0 && len >= total_size)
+    {
         return len / 2;
-    } 
+    }
     /* if the remainder is less than len, the remainder will be an entry */
-    if (len >= total_size - current_offset) {
+    if (len >= total_size - current_offset)
+    {
         return total_size - current_offset;
     }
     /* If our default len is too small, use a bigger one */
-    if (total_size > len * 256) {
+    if (total_size > len * 256)
+    {
         return total_size / 256;
     }
     return len;
 }
 
-#define MAX_BDL_ENTIRES 256
-#define LAST_VALID_INDEX 0x8C + (OUTPUT_STREAM_NUM * 0x20)
-#define BDL_LOWER 0x98 + (OUTPUT_STREAM_NUM * 0x20)
-#define BDL_UPPER 0x9C + (OUTPUT_STREAM_NUM * 0x20)
-
-// Buffer Descriptor List Entry
-typedef struct {
-    uint32_t reserved:31;
-    uint32_t ioc:1;
-    uint32_t length:32;
-    uint64_t address:64;
-} __attribute__((packed, aligned(128))) bdle_t;
-
-// Buffer Descriptor List
-struct hda_bdl {
-    bdle_t buf[MAX_BDL_ENTIRES];
-} __attribute__((aligned(128)));
-
-void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data) {
+static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
+{
     assert((data.size & 0x3F) == 0); // Ensure 128-byte aligned
-    
+
     /* split the data into BDL entries */
     struct hda_bdl *bdl;
-	bdl = malloc(sizeof(struct hda_bdl));
+    bdl = malloc(sizeof(struct hda_bdl));
     uint16_t index = 0;
     uint64_t curr_offset = 0;
-    while (data.size >= curr_offset) {
+    while (data.size >= curr_offset)
+    {
         uint64_t chunksize = get_chunk_size(curr_offset, data.size);
         curr_offset += chunksize;
         bdl->buf[index].address = ((uint64_t)data.buffer) + curr_offset;
@@ -1630,40 +1102,20 @@ void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data) {
     hda_pci_write_regw(dev, LAST_VALID_INDEX, LVI);
 
     /* program the BDL address */
-    uint32_t bdl_u = (uint32_t)(((uint64_t)bdl)>>32);
+    uint32_t bdl_u = (uint32_t)(((uint64_t)bdl) >> 32);
     uint32_t bdl_l = ((uint32_t)(((uint64_t)bdl))) & 0xFFC0 ; // TODO: Make sure correct.
 
     hda_pci_write_regl(dev, BDL_LOWER, bdl_l);
-    hda_pci_write_regl(dev, BDL_UPPER, bdl_u);    
+    hda_pci_write_regl(dev, BDL_UPPER, bdl_u);
 }
 
-#define DPLBASE 0x70
-typedef struct {
-    
-} __attribute__((packed, aligned(128))) dplbase_t;
-
-void write_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control) {
-    DEBUG("Write SD Control: byte1: %02x byte2: %02x byte3: %02x\n",
-            sd_control->byte_1, sd_control->byte_2, sd_control->byte_3);
-
-    hda_pci_write_regb(dev, SDNCTL, sd_control->byte_1);
-    hda_pci_write_regb(dev, SDNCTL + 1, sd_control->byte_2);
-    hda_pci_write_regb(dev, SDNCTL + 2, sd_control->byte_3);
-}
-
-void read_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control){
-    sd_control->byte_1  = hda_pci_read_regb(dev, SDNCTL);
-    sd_control->byte_2 = hda_pci_read_regb(dev, SDNCTL + 1);
-    sd_control->byte_3 = hda_pci_read_regb(dev, SDNCTL + 2);
-    DEBUG("Read SD Control: byte1: %02x byte2: %02x byte3: %02x\n",
-            sd_control->byte_1, sd_control->byte_2, sd_control->byte_3);
-}
-
-void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
-    /* make sure the run bit is zero for SD */
+static void setup_stream(struct hda_pci_dev *dev, struct audio_data data)
+{
+    /* make sure the run bit and reset bits are zero for SD */
     sdnctl_t sd_control;
     read_sd_control(dev, &sd_control);
     sd_control.run = 0;
+    sd_control.srst = 0;
     write_sd_control(dev, &sd_control);
 
     /* program the stream_tag */
@@ -1693,7 +1145,7 @@ void setup_stream(struct hda_pci_dev *dev, struct audio_data data) {
     write_sd_control(dev, &sd_control);
 }
 
-void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_node)
+static void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_node)
 {
     DEBUG("Setting up audio output widget (node %d)\n", output_widget_node);
 
@@ -1704,15 +1156,15 @@ void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_n
     transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(GET_CONVCTL, 0), &rp);
     output_wg_ctl.val = (uint8_t) rp.resp;
     DEBUG("Node %d converter stream channel: %08x. Stream: %02x, Channel: %02x\n", \
-    output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
+          output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
 
     output_wg_ctl.stream = STREAM_NUM;
     output_wg_ctl.channel = 0;
     transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(SET_CONVCTL, output_wg_ctl.val), &rp);
-    
+
     transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(GET_CONVCTL, 0), &rp);
     DEBUG("Node %d converter stream channel: %08x. Stream: %02x, Channel: %02x\n", \
-    output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
+          output_widget_node, rp.resp, output_wg_ctl.stream, output_wg_ctl.channel);
 
     // Make sure that the DAC is fully powered (step 6 in OSDEV)
     transact(dev, codec, output_widget_node, 0, MAKE_VERB_8(GET_POWSTATE, 0), &rp);
@@ -1723,7 +1175,7 @@ void setup_output_widget(struct hda_pci_dev *dev, int codec, int output_widget_n
     DEBUG("Node %d gain mute: %08x\n", output_widget_node, rp.resp);
 }
 
-void setup_pin_widget(struct hda_pci_dev *dev, int codec, int pin_widget_node)
+static void setup_pin_widget(struct hda_pci_dev *dev, int codec, int pin_widget_node)
 {
     DEBUG("Enabling speaker (node %d)\n", pin_widget_node);
 
@@ -1735,24 +1187,26 @@ void setup_pin_widget(struct hda_pci_dev *dev, int codec, int pin_widget_node)
 
     pin_wg_cntl.val = (uint8_t) rp.resp;
     DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, pin_wg_cntl.val);
-    
+
     pin_wg_cntl.out_enable = 1;
     transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(SET_PINWGTCTL, pin_wg_cntl.val), &rp);
-    
+
     transact(dev, codec, pin_widget_node, 0, MAKE_VERB_8(GET_PINWGTCTL, 0), &rp);
     DEBUG("Get node %d pin widget control: %08x\n", pin_widget_node, rp.resp);
     pin_wg_cntl.val = (uint8_t) rp.resp;
 
     DEBUG("Node %d pin widget control output enable: %d\n", pin_widget_node, pin_wg_cntl.out_enable);
 }
+
 /* function to call externally to play audio */
-void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size) {
+void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size)
+{
     /* package up a struct */
     struct audio_data data;
     data.buffer = buffer;
     data.size = size;
     //data.format = format;
-    
+
     /* setup stream */
     setup_stream(dev, data);
 
@@ -1763,12 +1217,12 @@ void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size) {
     setup_pin_widget(dev, 0, 3); // TODO: Get pin widget number and codec automatically
 
     /* start stream */
-    start_stream(dev, data);
+    start_stream(dev);
 
     codec_resp_t rp;
     transact(dev, 0, 0, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
     DEBUG("Get node 0 connection list: %08x\n", rp.resp);
-    
+
     transact(dev, 0, 1, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
     DEBUG("Get node 1 connection list: %08x\n", rp.resp);
 
@@ -1777,11 +1231,4 @@ void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size) {
 
     transact(dev, 0, 3, 0, MAKE_VERB_8(GET_CONLIST, 0), &rp);
     DEBUG("Get node 3 connection list: %08x\n", rp.resp);
-/*
-    transact(dev, 0, 0, 0, MAKE_VERB_8(0x70A, 1), &rp);
-    transact(dev, 0, 1, 0, MAKE_VERB_8(0x70A, 1), &rp);
-    transact(dev, 0, 2, 0, MAKE_VERB_8(0x70A, 1), &rp);
-    transact(dev, 0, 3, 0, MAKE_VERB_8(0x70A, 1), &rp);
-    transact(dev, 0, 4, 0, MAKE_VERB_8(0x70A, 1), &rp);
-*/
 }
