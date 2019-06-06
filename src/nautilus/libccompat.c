@@ -37,7 +37,7 @@
 #include <nautilus/errno.h>
 #include <nautilus/random.h>
 #include <dev/hpet.h>
-
+#include <math.h>
 
 int errno=0;
 
@@ -732,7 +732,29 @@ else
 }
 double sin(double x)
 {
-return x;
+    // Convert radian to degree
+    x = x * 180 / M_PI;
+
+    while(x < 0)
+    {
+        x += 360;
+    }
+    while(x > 180)
+    {
+        x -= 360;
+    }
+
+    double neg = 1;
+
+    if(x < 0)
+    {
+        x = -x;
+        neg = -1;
+    }
+
+    double sin_val = neg * 4 * x * (180 - x) / (40500 - x * (180 - x));
+    
+    return sin_val;
 }
 double sinh(double x)
 {
