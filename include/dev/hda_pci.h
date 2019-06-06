@@ -428,9 +428,11 @@ struct audio_data
 #define INTCTL 0x20
 
 #define MAX_BDL_ENTIRES 256
+#define LPIB 0x84 + (OUTPUT_STREAM_NUM * 0x20)
 #define LAST_VALID_INDEX 0x8C + (OUTPUT_STREAM_NUM * 0x20)
 #define BDL_LOWER 0x98 + (OUTPUT_STREAM_NUM * 0x20)
 #define BDL_UPPER 0x9C + (OUTPUT_STREAM_NUM * 0x20)
+#define STRM_DESC 0x92 + (OUTPUT_STREAM_NUM * 0x20)
 
 // Buffer Descriptor List Entry
 typedef struct
@@ -518,5 +520,6 @@ typedef struct
 
 #define OUTPUT_STREAM_NUM   4 // First output stream in QEMU. See https://github.com/qemu/qemu/blob/ad88e4252f09c2956b99c90de39e95bab2e8e7af/hw/audio/intel-hda.c#L891
 #define STREAM_NUM          5 // Arbitrarily chosen
-#define BUFF_SIZE  1210848 // For testing. Change later
+#define BUFF_SIZE           1210848 // For testing. Change later
+#define ONE_KHZ_SIZE        1920000 // For testing. Change later
 #endif

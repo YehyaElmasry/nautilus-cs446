@@ -26,7 +26,9 @@
 
 #include <dev/hda_pci.h>
 #include <math.h>
-#include <test/piano.h>
+//#include <test/piano.h>
+#include <test/one_khz.h>
+
 
 // On QEMU using -soundhw hda we see the following:
 //
@@ -674,6 +676,7 @@ static void setup_interrupts(struct hda_pci_dev *d)
     c.val = 0;
     c.cie = 1;
     c.gie = 1;
+    c.sie = -1;
 
     hda_pci_write_regl(d, INTCTL, c.val);
 
@@ -811,13 +814,12 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
 {
     struct hda_pci_dev *d = (struct hda_pci_dev *) priv_data;
 
-    //DEBUG("We got interrupt %d for device at %p\n", v, d);
-
     intsts_t is;
 
     is.val = hda_pci_read_regl(d, INTSTS);
 
-    //DEBUG("Interrupt status %08x\n", is.val);
+    //DEBUG("Interrupt %d status %08x\n", v,  is.val);
+    //DEBUG("We are at byte %d of %d\n", hda_pci_read_regl(d, LPIB),hda_pci_read_regl(d, SDNCBL));
 
     // handle
 
@@ -853,6 +855,7 @@ static int bringup_device(struct hda_pci_dev *dev)
     // configure interrupts
     if (dev->pci_dev->msi.type == PCI_MSI_32 || dev->pci_dev->msi.type == PCI_MSI_64)
     {
+        DEBUG("CONFIGURING INTERUPTS\n");
         int num_vecs = dev->pci_dev->msi.num_vectors_needed;
         int base_vec;
         int i;
@@ -867,12 +870,17 @@ static int bringup_device(struct hda_pci_dev *dev)
             ERROR("Failed to enable MSI on device...\n");
             return -1;
         }
+        DEBUG("Trying to register interupts for %d through %d\n", base_vec, base_vec + num_vecs - 1);
         for (i = base_vec; i < base_vec + num_vecs; i++)
         {
             if (register_int_handler(i, handler, dev))
             {
                 ERROR("Failed to register interrupt %d\n", i);
                 return -1;
+            }
+            else
+            {
+                DEBUG("Registered int handler for %d\n", i);
             }
         }
 
@@ -882,6 +890,10 @@ static int bringup_device(struct hda_pci_dev *dev)
             {
                 ERROR("Failed to unmask MSI interrupt %d\n", i);
                 return -1;
+            } 
+            else 
+            {
+                DEBUG("Unmasked msi for %d\n", i);
             }
         }
 
@@ -918,18 +930,8 @@ static int bringup_device(struct hda_pci_dev *dev)
     setup_interrupts(dev);
 
     setup_codecs(dev);
-    
-    char *buf = (char *) malloc(BUFF_SIZE);
-    memcpy(buf, piano, BUFF_SIZE);
-    DEBUG("Audio buffer address: 0x%016x\n", buf);
-    // Fill up buffer with random numbers
-    /*
-    for (int i = 0; i < BUFF_SIZE; i++)
-    {
-        buf[i] = sin(4*i);
-    }
-    */
-    audio_from_buffer(dev, buf, BUFF_SIZE);
+
+    play_tone(dev, 441, 48000, 2);
 
     return 0;
 }
@@ -1020,8 +1022,8 @@ static void start_stream(struct hda_pci_dev *dev)
 {
     sdnctl_t sd_control;
 
-    /* disable SIE */
-    hda_pci_write_regl(dev, INTCTL, 0);
+    /* enable interupts */
+    //hda_pci_write_regl(dev, INTCTL, 0x);
 
     /* set stripe control */
     read_sd_control(dev, &sd_control);
@@ -1066,18 +1068,23 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
     DEBUG("BDL malloc address: 0x%016x\n", bdl);
     uint16_t index = 0;
     uint64_t curr_offset = 0;
-
+    uint64_t chunksize = 0;
     while (curr_offset < data.size)
     {
-        uint64_t chunksize = get_chunk_size(curr_offset, data.size);
+        chunksize = get_chunk_size(curr_offset, data.size);
         DEBUG("Initialize BDL: index: %d chuncksize: %d data.size: %d data.buffer: 0x%016x\n", index, chunksize, data.size, data.buffer);
         bdl->buf[0].reserved = 0; // Reserved must be 0. See page 56 of Intel HDA Manual
-        bdl->buf[index].address = ((uint64_t)data.buffer) + curr_offset;
+        bdl->buf[index].address = (((uint64_t)data.buffer) + curr_offset) & (~0x7FUL);
+        DEBUG("BDL address: 0x%016x\n", bdl->buf[index].address);
         bdl->buf[index].length = chunksize;
-        bdl->buf[index].ioc = 0; // We don't want interrupts
+        bdl->buf[index].ioc = 1; // We don't want interrupts
         index++;
         curr_offset += chunksize;
     }
+
+    bdl->buf[index-1].ioc = 1;
+
+    DEBUG("Setup %d buffers with %d/%d bytes\n", index - 1, curr_offset - chunksize, data.size);
 
     /* program the stream LVI (last valid index) of the BDL */
     uint16_t LVI = hda_pci_read_regw(dev, LAST_VALID_INDEX);
@@ -1122,6 +1129,7 @@ static void setup_stream(struct hda_pci_dev *dev, struct audio_data data)
 
     /* program the stream format */
     // Not doing anything now. Stick with defaults
+    DEBUG("Stream Descriptor: 0x%04x\n", hda_pci_read_regw(dev, STRM_DESC));
 
     /* initialize BDL */
     initialize_bdl(dev, data);
@@ -1188,6 +1196,31 @@ static void setup_pin_widget(struct hda_pci_dev *dev, int codec, int pin_widget_
     pin_wg_cntl.val = (uint8_t) rp.resp;
 
     DEBUG("Node %d pin widget control output enable: %d\n", pin_widget_node, pin_wg_cntl.out_enable);
+}
+
+// Assumes 8-bit audio with 2 channels
+void play_tone(struct hda_pci_dev *dev, uint64_t tone_frequency, uint64_t sampling_frequency, uint32_t duration)
+{
+    uint64_t buf_len = sampling_frequency * duration * 4;
+    //uint64_t buf_len = ONE_KHZ_SIZE / 10;
+    uint8_t *buf = (uint8_t *) malloc(buf_len);
+    create_sine_wave(buf, buf_len, tone_frequency, sampling_frequency);
+    audio_from_buffer(dev, buf, buf_len);
+}
+
+// Assumes 8-bit audio with 2 channels
+void create_sine_wave(uint8_t *buffer, uint64_t buffer_len, uint64_t tone_frequency, uint64_t sampling_frequency)
+{
+    for (int i = 0, j = 0; i < buffer_len; i+=4, j++)
+    {
+        double x = (double) j * 2.0 * M_PI * (double) tone_frequency / (double) sampling_frequency;
+        double sin_val = sin(x);
+        
+        buffer[i] = 0;
+        buffer[i + 1] = (uint8_t) (sin_val * 127.0);
+        buffer[i + 2] = 0;
+        buffer[i + 3] = (uint8_t) (sin_val * 127.0);
+    }
 }
 
 /* function to call externally to play audio */
