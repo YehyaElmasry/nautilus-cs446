@@ -33,6 +33,9 @@
 
 struct hda_pci_dev *hda_dev; // TODO: Used for play handler. Remove and pass a pointer to dev to handle_play instead
 
+static void read_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control);
+static void write_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control);
+
 static int
 handle_play (char * buf, void * priv)
 {
@@ -851,6 +854,8 @@ static void setup_codecs(struct hda_pci_dev *d)
     }
 }
 
+int done = 0;
+
 static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
 {
     struct hda_pci_dev *d = (struct hda_pci_dev *) priv_data;
@@ -859,12 +864,10 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
 
     is.val = hda_pci_read_regl(d, INTSTS);
 
-    DEBUG("Interrupt %d status %08x\n", v,  is.val);
-    DEBUG("We are at byte %d of %d\n", hda_pci_read_regl(d, LPIB),hda_pci_read_regl(d, SDNCBL));
+    //DEBUG("Interrupt %d status %08x\n", v,  is.val);
+    //DEBUG("We are at byte %d of %d\n", hda_pci_read_regl(d, LPIB),hda_pci_read_regl(d, SDNCBL));
 
-    /* program the BDL address */
-    /*
-    if (is.val == 0xc0000010 )
+    if (is.val == 0xc0000010)
     {
         uint32_t bdl_l = hda_pci_read_regl(d, BDL_LOWER);
         uint32_t bdl_u = hda_pci_read_regl(d, BDL_UPPER);
@@ -877,8 +880,12 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
         {
             DEBUG("Index: %d value: 0x%016lx\n", i, ((uint64_t*)bdl_addr)[i]);
         }
+        sdnctl_t sd_control;
+        read_sd_control(d, &sd_control);
+
+        DEBUG("Interrupt handler: stream desciptor run: %d\n", sd_control.run);
+        DEBUG("Interrupt handler: stream desciptor status: 0x%02x\n", hda_pci_read_regb(d, SD0STS));
     }
-    */
 
     IRQ_HANDLER_END();
 
@@ -1141,7 +1148,7 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
         curr_offset += chunksize;
     }
 
-    bdl->buf[index-1].ioc = 0;
+    bdl->buf[index-1].ioc = 1;
 
     DEBUG("Setup %d buffers with %d/%d bytes\n", index, curr_offset, data.size);
 
@@ -1178,8 +1185,20 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
 
 static void setup_stream(struct hda_pci_dev *dev, struct audio_data data)
 {
-    /* make sure the run bit and reset bits are zero for SD */
+    /* reset stream */
     sdnctl_t sd_control;
+
+    read_sd_control(dev, &sd_control);
+    sd_control.srst = 1;
+    write_sd_control(dev, &sd_control);
+
+    do
+    {
+        read_sd_control(dev, &sd_control);
+    } while (sd_control.srst == 1); // Wait till stream is done resetting
+    
+
+    /* make sure the run bit and reset bits are zero for SD */
     read_sd_control(dev, &sd_control);
     sd_control.run = 0;
     sd_control.srst = 0;
@@ -1304,10 +1323,10 @@ void audio_from_buffer(struct hda_pci_dev *dev, void *buffer, uint64_t size)
     setup_stream(dev, data);
 
     /* enable audio output widget */
-    setup_output_widget(dev, 0, 2); // TODO: Get output widget and codec automatically
+    setup_output_widget(dev, 0, 2);     // TODO: Get output widget and codec automatically
 
     /* enable speaker */
-    setup_pin_widget(dev, 0, 3); // TODO: Get pin widget number and codec automatically
+    setup_pin_widget(dev, 0, 3);        // TODO: Get pin widget number and codec automatically
 
     /* start stream */
     start_stream(dev);

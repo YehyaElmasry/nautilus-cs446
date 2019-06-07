@@ -389,6 +389,7 @@ typedef union
 
 
 #define SDNCTL 0x80 + (OUTPUT_STREAM_NUM * 0x20)
+#define SD0STS 0x83 + (OUTPUT_STREAM_NUM * 0x20)
 // Stream Descriptor n Control, 3 bytes
 typedef union
 {
