@@ -26,9 +26,50 @@
 
 #include <dev/hda_pci.h>
 #include <math.h>
-//#include <test/piano.h>
-#include <test/one_khz.h>
+#include <nautilus/shell.h>
 
+#include <test/piano.h>
+//#include <test/one_khz.h>
+
+struct hda_pci_dev *hda_dev; // TODO: Used for play handler. Remove and pass a pointer to dev to handle_play instead
+
+static int
+handle_play (char * buf, void * priv)
+{
+    uint64_t frequency, duration;
+
+    sscanf(buf, "play %d %d", &frequency, &duration);
+
+    play_tone(hda_dev, frequency, 48000, duration);
+    
+    nk_vc_printf("Frequency %d duration %d\n", frequency, duration);
+
+    return 0;
+}
+
+static struct shell_cmd_impl play_impl = {
+    .cmd      = "play",
+    .help_str = "play frequency duration",
+    .handler  = handle_play,
+};
+nk_register_shell_cmd(play_impl);
+
+static int
+handle_play_piano (char * buf, void * priv)
+{
+    char *play_buf = malloc(PIANO_SIZE);
+    memcpy(play_buf, piano, PIANO_SIZE);
+    audio_from_buffer(hda_dev, play_buf, PIANO_SIZE);
+
+    return 0;
+}
+
+static struct shell_cmd_impl play_piano_impl = {
+    .cmd      = "play_piano",
+    .help_str = "play_piano",
+    .handler  = handle_play_piano,
+};
+nk_register_shell_cmd(play_piano_impl);
 
 // On QEMU using -soundhw hda we see the following:
 //
@@ -818,11 +859,26 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
 
     is.val = hda_pci_read_regl(d, INTSTS);
 
-    //DEBUG("Interrupt %d status %08x\n", v,  is.val);
-    //DEBUG("We are at byte %d of %d\n", hda_pci_read_regl(d, LPIB),hda_pci_read_regl(d, SDNCBL));
+    DEBUG("Interrupt %d status %08x\n", v,  is.val);
+    DEBUG("We are at byte %d of %d\n", hda_pci_read_regl(d, LPIB),hda_pci_read_regl(d, SDNCBL));
 
-    // handle
+    /* program the BDL address */
+    /*
+    if (is.val == 0xc0000010 )
+    {
+        uint32_t bdl_l = hda_pci_read_regl(d, BDL_LOWER);
+        uint32_t bdl_u = hda_pci_read_regl(d, BDL_UPPER);
 
+        uint64_t bdl_addr = (((uint64_t) bdl_u) << 32) | bdl_l;
+
+        DEBUG("BDL address: 0x%016lx\n", bdl_addr);
+
+        for (int i = 0; i < 10; i++)
+        {
+            DEBUG("Index: %d value: 0x%016lx\n", i, ((uint64_t*)bdl_addr)[i]);
+        }
+    }
+    */
 
     IRQ_HANDLER_END();
 
@@ -931,7 +987,9 @@ static int bringup_device(struct hda_pci_dev *dev)
 
     setup_codecs(dev);
 
-    play_tone(dev, 441, 48000, 2);
+    hda_dev = dev;  //TODO: Dont' use global variable. Pass dev pointer to shell handlers instead
+
+    //play_tone(dev, 440, 48000, 4);
 
     return 0;
 }
@@ -1063,28 +1121,29 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
     assert((data.size & 0x3F) == 0); // Ensure 128-byte aligned
 
     /* split the data into BDL entries */
-    hda_bdl *bdl;
-    bdl = malloc(sizeof(hda_bdl));
-    DEBUG("BDL malloc address: 0x%016x\n", bdl);
+    hda_bdl *bdl = (hda_bdl *) malloc(sizeof(hda_bdl));
+    DEBUG("Allocated %d bytes for bdl\n", sizeof(hda_bdl));
+    DEBUG("BDL malloc address: 0x%016lx\n", bdl);
     uint16_t index = 0;
     uint64_t curr_offset = 0;
     uint64_t chunksize = 0;
     while (curr_offset < data.size)
     {
+        DEBUG("Address of BDLE is 0x%016lx\n", &(bdl->buf[index]));
         chunksize = get_chunk_size(curr_offset, data.size);
-        DEBUG("Initialize BDL: index: %d chuncksize: %d data.size: %d data.buffer: 0x%016x\n", index, chunksize, data.size, data.buffer);
-        bdl->buf[0].reserved = 0; // Reserved must be 0. See page 56 of Intel HDA Manual
+        DEBUG("Initialize BDL: index: %d chuncksize: %d data.size: %d data.buffer: 0x%016lx\n", index, chunksize, data.size, data.buffer);
+        bdl->buf[index].reserved = 0; // Reserved must be 0. See page 56 of Intel HDA Manual
         bdl->buf[index].address = (((uint64_t)data.buffer) + curr_offset) & (~0x7FUL);
-        DEBUG("BDL address: 0x%016x\n", bdl->buf[index].address);
+        DEBUG("BDL address: 0x%016lx\n", bdl->buf[index].address);
         bdl->buf[index].length = chunksize;
-        bdl->buf[index].ioc = 1; // We don't want interrupts
+        bdl->buf[index].ioc = 0;
         index++;
         curr_offset += chunksize;
     }
 
-    bdl->buf[index-1].ioc = 1;
+    bdl->buf[index-1].ioc = 0;
 
-    DEBUG("Setup %d buffers with %d/%d bytes\n", index - 1, curr_offset - chunksize, data.size);
+    DEBUG("Setup %d buffers with %d/%d bytes\n", index, curr_offset, data.size);
 
     /* program the stream LVI (last valid index) of the BDL */
     uint16_t LVI = hda_pci_read_regw(dev, LAST_VALID_INDEX);
@@ -1102,6 +1161,15 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
 
     hda_pci_write_regl(dev, BDL_LOWER, bdl_l);
     hda_pci_write_regl(dev, BDL_UPPER, bdl_u);
+
+    uint64_t bdl_addr = (((uint64_t) bdl_u) << 32) | bdl_l;
+
+    DEBUG("BDL address: 0x%016lx\n", bdl_addr);
+
+    for (int i = 0; i < 10; i++)
+    {
+        DEBUG("Index: %d value: 0x%016lx\n", i, ((uint64_t*)bdl)[i]);
+    }
 
     DEBUG("BDL Write: 0x%08x:%08x\n", bdl_u, bdl_l);
 

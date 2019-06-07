@@ -439,9 +439,9 @@ typedef struct
 {
     uint64_t address: 64;
     uint32_t length: 32;
-    uint32_t ioc: 1;
+    uint8_t ioc: 1;
     uint32_t reserved: 31;
-} __attribute__((packed, aligned(128))) bdle_t;
+} __attribute__((packed, aligned(16))) bdle_t;
 
 // Buffer Descriptor List
 typedef struct
@@ -520,6 +520,6 @@ typedef struct
 
 #define OUTPUT_STREAM_NUM   4 // First output stream in QEMU. See https://github.com/qemu/qemu/blob/ad88e4252f09c2956b99c90de39e95bab2e8e7af/hw/audio/intel-hda.c#L891
 #define STREAM_NUM          5 // Arbitrarily chosen
-#define BUFF_SIZE           1210848 // For testing. Change later
+#define PIANO_SIZE          1210848 // For testing. Change later
 #define ONE_KHZ_SIZE        1920000 // For testing. Change later
 #endif
