@@ -25,16 +25,15 @@
 #include <dev/pci.h>
 
 #include <dev/hda_pci.h>
+#include <dev/hda_pci_internal.h>
 #include <math.h>
 #include <nautilus/shell.h>
 
-#include <test/piano.h>
-//#include <test/one_khz.h>
-
-struct hda_pci_dev *hda_dev; // TODO: Used for play handler. Remove and pass a pointer to dev to handle_play instead
+struct hda_pci_dev *hda_dev; // TODO: Used for play handlers. Remove and pass a pointer to dev to handle_play instead
 
 static void read_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control);
 static void write_sd_control(struct hda_pci_dev *dev, sdnctl_t *sd_control);
+
 
 static int
 handle_play (char * buf, void * priv)
@@ -74,6 +73,23 @@ static struct shell_cmd_impl play_piano_impl = {
 };
 nk_register_shell_cmd(play_piano_impl);
 
+static int
+handle_play_champions (char * buf, void * priv)
+{
+    char *play_buf = malloc(CHAMPIONS_SIZE);
+    memcpy(play_buf, champions, CHAMPIONS_SIZE);
+    audio_from_buffer(hda_dev, play_buf, CHAMPIONS_SIZE);
+
+    return 0;
+}
+
+static struct shell_cmd_impl play_champions_impl = {
+    .cmd      = "play_champions",
+    .help_str = "play_champions",
+    .handler  = handle_play_champions,
+};
+nk_register_shell_cmd(play_champions_impl);
+
 // On QEMU using -soundhw hda we see the following:
 //
 //0:4.0 : 8086:2668 0103c 0010s MSI(off,MSI64,nn=1,bv=0,nv=0,tc=0) legacy(l=11,p=1)
@@ -86,55 +102,6 @@ static int num_devs = 0;
 
 // list of hda devices
 static struct list_head dev_list;
-
-struct hda_pci_dev
-{
-    // for protection of per-device state
-    spinlock_t      lock;
-
-    // we are a (generic) nk dev so far
-    struct nk_dev  *nk_dev;
-
-    // we are a PCI device
-    struct pci_dev *pci_dev;
-
-    // we will be put on a list of all hda devices
-    struct list_head hda_node;
-
-
-    // the following is for legacy interrupts
-    // we will try to use MSI first
-    uint8_t   pci_intr;  // number on bus
-    uint8_t   intr_vec;  // number we will see
-
-    // The following hide the details of the PCI BARs, since
-    // we only have one block of registers
-    enum { NONE, IO, MEMORY}  method;
-
-    // Where registers are mapped into the I/O address space
-    // if at all
-    uint16_t  ioport_start;
-    uint16_t  ioport_end;
-
-    // Where registers are mapped into the physical memory address space
-    // if at all
-    uint64_t  mem_start;
-    uint64_t  mem_end;
-
-    // copies of state handy to keep, should do similar for each codec
-    gcap_t   gcap;
-    vmin_t   vmin;
-    vmaj_t   vmaj;
-    outpay_t outpay;
-    inpay_t  inpay;
-
-    // per codec state
-    codec_state_t codecs[SDIMAX];
-
-    corb_state_t corb;  // command output ring buffer
-    rirb_state_t rirb;  // response input ring buffer
-
-};
 
 // accessor functions for device registers
 
@@ -995,9 +962,6 @@ static int bringup_device(struct hda_pci_dev *dev)
     setup_codecs(dev);
 
     hda_dev = dev;  //TODO: Dont' use global variable. Pass dev pointer to shell handlers instead
-
-    //play_tone(dev, 440, 48000, 4);
-
     return 0;
 }
 
@@ -1138,9 +1102,10 @@ static void initialize_bdl(struct hda_pci_dev *dev, struct audio_data data)
     {
         DEBUG("Address of BDLE is 0x%016lx\n", &(bdl->buf[index]));
         chunksize = get_chunk_size(curr_offset, data.size);
+        chunksize += chunksize % 128;
         DEBUG("Initialize BDL: index: %d chuncksize: %d data.size: %d data.buffer: 0x%016lx\n", index, chunksize, data.size, data.buffer);
         bdl->buf[index].reserved = 0; // Reserved must be 0. See page 56 of Intel HDA Manual
-        bdl->buf[index].address = (((uint64_t)data.buffer) + curr_offset) & (~0x7FUL);
+        bdl->buf[index].address = (((uint64_t)data.buffer) + curr_offset);
         DEBUG("BDL address: 0x%016lx\n", bdl->buf[index].address);
         bdl->buf[index].length = chunksize;
         bdl->buf[index].ioc = 0;
@@ -1286,17 +1251,7 @@ static void setup_pin_widget(struct hda_pci_dev *dev, int codec, int pin_widget_
 }
 
 // Assumes 8-bit audio with 2 channels
-void play_tone(struct hda_pci_dev *dev, uint64_t tone_frequency, uint64_t sampling_frequency, uint32_t duration)
-{
-    uint64_t buf_len = sampling_frequency * duration * 4;
-    //uint64_t buf_len = ONE_KHZ_SIZE / 10;
-    uint8_t *buf = (uint8_t *) malloc(buf_len);
-    create_sine_wave(buf, buf_len, tone_frequency, sampling_frequency);
-    audio_from_buffer(dev, buf, buf_len);
-}
-
-// Assumes 8-bit audio with 2 channels
-void create_sine_wave(uint8_t *buffer, uint64_t buffer_len, uint64_t tone_frequency, uint64_t sampling_frequency)
+static void create_sine_wave(uint8_t *buffer, uint64_t buffer_len, uint64_t tone_frequency, uint64_t sampling_frequency)
 {
     for (int i = 0, j = 0; i < buffer_len; i+=4, j++)
     {
@@ -1308,6 +1263,16 @@ void create_sine_wave(uint8_t *buffer, uint64_t buffer_len, uint64_t tone_freque
         buffer[i + 2] = 0;
         buffer[i + 3] = (uint8_t) (sin_val * 127.0);
     }
+}
+
+// Assumes 8-bit audio with 2 channels
+void play_tone(struct hda_pci_dev *dev, uint64_t tone_frequency, uint64_t sampling_frequency, uint32_t duration)
+{
+    uint64_t buf_len = sampling_frequency * duration * 4;
+    //uint64_t buf_len = ONE_KHZ_SIZE / 10;
+    uint8_t *buf = (uint8_t *) malloc(buf_len);
+    create_sine_wave(buf, buf_len, tone_frequency, sampling_frequency);
+    audio_from_buffer(dev, buf, buf_len);
 }
 
 /* function to call externally to play audio */
