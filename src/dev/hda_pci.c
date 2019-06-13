@@ -60,6 +60,7 @@ static int
 handle_play_piano (char * buf, void * priv)
 {
     char *play_buf = malloc(PIANO_SIZE);
+    DEBUG("Audio buffer address: 0x%016lx\n", play_buf);
     memcpy(play_buf, piano, PIANO_SIZE);
     audio_from_buffer(hda_dev, play_buf, PIANO_SIZE);
 
@@ -77,6 +78,7 @@ static int
 handle_play_champions (char * buf, void * priv)
 {
     char *play_buf = malloc(CHAMPIONS_SIZE);
+    DEBUG("Audio buffer address: 0x%016lx\n", play_buf);
     memcpy(play_buf, champions, CHAMPIONS_SIZE);
     audio_from_buffer(hda_dev, play_buf, CHAMPIONS_SIZE);
 
@@ -834,19 +836,28 @@ static int handler(excp_entry_t *e, excp_vec_t v, void *priv_data)
     //DEBUG("Interrupt %d status %08x\n", v,  is.val);
     //DEBUG("We are at byte %d of %d\n", hda_pci_read_regl(d, LPIB),hda_pci_read_regl(d, SDNCBL));
 
-    if (is.val == 0xc0000010)
+    if (is.val & (1 << (STREAM_NUM - 1)))   // Interrupt on completion of STREAM_NUM
     {
         uint32_t bdl_l = hda_pci_read_regl(d, BDL_LOWER);
         uint32_t bdl_u = hda_pci_read_regl(d, BDL_UPPER);
 
         uint64_t bdl_addr = (((uint64_t) bdl_u) << 32) | bdl_l;
+        uint64_t audio_buffer_addr = ((uint64_t*)bdl_addr)[0];
 
         DEBUG("BDL address: 0x%016lx\n", bdl_addr);
+        DEBUG("Audio buffer address: 0x%016lx\n", audio_buffer_addr);
 
         for (int i = 0; i < 10; i++)
         {
             DEBUG("Index: %d value: 0x%016lx\n", i, ((uint64_t*)bdl_addr)[i]);
         }
+
+        DEBUG("Freeing BDL...\n");
+        free((void*) bdl_addr);
+        
+        DEBUG("Freeing audio buffer...\n");
+        free((void*) audio_buffer_addr);
+
         sdnctl_t sd_control;
         read_sd_control(d, &sd_control);
 
@@ -1271,6 +1282,7 @@ void play_tone(struct hda_pci_dev *dev, uint64_t tone_frequency, uint64_t sampli
     uint64_t buf_len = sampling_frequency * duration * 4;
     //uint64_t buf_len = ONE_KHZ_SIZE / 10;
     uint8_t *buf = (uint8_t *) malloc(buf_len);
+    DEBUG("Audio buffer address: 0x%016lx\n", buf);
     create_sine_wave(buf, buf_len, tone_frequency, sampling_frequency);
     audio_from_buffer(dev, buf, buf_len);
 }
